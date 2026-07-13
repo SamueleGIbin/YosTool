@@ -6,7 +6,8 @@
 // @author       Samuele Gibin
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
-// ==/UserScript==
+// @updateURL   https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
+// @downloadURL https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
 
 (function () {
     'use strict';
