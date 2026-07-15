@@ -504,13 +504,13 @@
                 if (!risultato) return;
 
                 const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
-                if (diffMinuti > SOGLIA_SCARICO_MINUTI || diffMinuti <= -30) return;
+                if (diffMinuti > SOGLIA_SCARICO_MINUTI) return;
 
                 const chiave = risultato.cat.nome;
                 if (!gruppi.has(chiave)) {
                     gruppi.set(chiave, { turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
                 }
-                gruppi.get(chiave).baie.push(localitaTradotta);
+                gruppi.get(chiave).baie.push({ nome: localitaTradotta, diffMinuti: diffMinuti });
             });
             renderPannelloScaricoConteggi(panel, gruppi, headerHtml);
             return;
@@ -534,13 +534,13 @@
             const localitaTradotta = codeMap[codiceOrigine] || codiceOrigine;
 
             const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
-            if (diffMinuti > SOGLIA_SCARICO_MINUTI || diffMinuti <= -30) continue;
+            if (diffMinuti > SOGLIA_SCARICO_MINUTI) continue;
 
             const chiave = risultato.cat.nome;
             if (!gruppi.has(chiave)) {
                 gruppi.set(chiave, { turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
             }
-            gruppi.get(chiave).baie.push(localitaTradotta);
+            gruppi.get(chiave).baie.push({ nome: localitaTradotta, diffMinuti: diffMinuti });
         }
         renderPannelloScaricoConteggi(panel, gruppi, headerHtml);
     }
@@ -552,16 +552,20 @@
         }
         const voci = [...gruppi.entries()].sort((a, b) => a[1].orario.getTime() - b[1].orario.getTime());
         let html = headerHtml;
+        const oraRender = new Date();
         voci.forEach(([nome, info]) => {
             const hh = String(info.orario.getHours()).padStart(2, "0");
             const mm = String(info.orario.getMinutes()).padStart(2, "0");
+            const diffGruppo = (info.orario.getTime() - oraRender.getTime()) / 60000;
+            const classeDot = diffGruppo <= 30 ? "tnt-dot-rosso" : "tnt-dot-giallo";
+            const listaBaie = info.baie.map((b) => b.diffMinuti < 0 ? b.nome + " (in ritardo)" : b.nome).join(", ");
             html += '<div style="padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.1);font-family:Roboto,sans-serif;">'
                 + '<div style="display:flex;align-items:center;">'
-                + '<span class="tnt-dot-giallo"></span>'
+                + '<span class="' + classeDot + '"></span>'
                 + '<span style="flex:1;color:#FF7A00;font-weight:bold;">' + nome + ' (' + info.baie.length + ')</span>'
                 + '<span style="font-size:12px;color:#FF7A00;font-weight:bold;">' + hh + ':' + mm + '</span>'
                 + '</div>'
-                + '<div style="font-size:11px;color:#FF7A00;opacity:0.7;margin-left:17px;">' + info.turno + ' · Unità: ' + info.baie.join(", ") + '</div>'
+                + '<div style="font-size:11px;color:#FF7A00;opacity:0.7;margin-left:17px;">' + info.turno + ' · Unità: ' + listaBaie + '</div>'
                 + '</div>';
         });
         panel.innerHTML = html;
