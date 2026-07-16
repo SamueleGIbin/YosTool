@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL SCARICO 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.3
 // @description  Orologi scadenze Carico/Scarico - Traduttore Codici - Cut Off - Tracciamento Arrivo Baia (API)
 // @author       Samuele Gibin
 // @match        https://yos.apps.tnt.com/hub-overview*
@@ -27,12 +27,64 @@
                 try {
                     if (this._tntUrl && String(this._tntUrl).indexOf("dockingDoors") !== -1) {
                         elaboraRispostaDockingDoors(JSON.parse(this.responseText));
+                        return;
                     }
+                } catch (e) {}
+                try {
+                    const dati = JSON.parse(this.responseText);
+                    if (sembraListaMovimenti(dati)) elaboraRispostaMovimenti(dati);
                 } catch (e) {}
             });
             return origSend.apply(this, arguments);
         };
     })();
+
+    // Cache unitId -> { origin, destination, scheduleArrival, estimatedArrival, actualArrival, movementName }
+    // Alimentata da qualunque risposta XHR che assomigli a una lista di "movements" (origin/scheduleArrival/units).
+    const cacheMovimentiPerUnit = new Map();
+
+    function sembraListaMovimenti(dati) {
+        return Array.isArray(dati) && dati.length > 0 && dati[0] && typeof dati[0] === "object"
+            && "movementId" in dati[0] && Array.isArray(dati[0].units) && "origin" in dati[0];
+    }
+
+    function elaboraRispostaMovimenti(movimenti) {
+        movimenti.forEach((m) => {
+            if (!m || !Array.isArray(m.units)) return;
+            m.units.forEach((u) => {
+                if (!u || !u.unitId) return;
+                cacheMovimentiPerUnit.set(String(u.unitId), {
+                    origin: m.origin,
+                    destination: m.destination,
+                    scheduleArrival: m.scheduleArrival,
+                    estimatedArrival: m.estimatedArrival,
+                    actualArrival: m.actualArrival,
+                    movementName: m.movementName
+                });
+            });
+        });
+    }
+
+    // Calcola il cutoff di una baia occupata incrociando l'unitId (da dockingDoors)
+    // con i dati di origine/orario schedulato (da cacheMovimentiPerUnit). Nessuna lettura del DOM.
+    function calcolaCutoffDaCacheMovimenti(doorNumber) {
+        const arrivi = caricaArriviBaia();
+        const voce = arrivi[doorNumber];
+        if (!voce || !voce.unitId) return null;
+
+        const mov = cacheMovimentiPerUnit.get(String(voce.unitId));
+        if (!mov || !mov.origin) return null;
+
+        const arrivoIso = mov.scheduleArrival || mov.estimatedArrival;
+        if (!arrivoIso) return null;
+
+        const arrivo = new Date(arrivoIso);
+        if (isNaN(arrivo.getTime())) return null;
+
+        const risultato = calcolaCutoffPerCodice(mov.origin, arrivo);
+        if (!risultato) return null;
+        return { cutoff: risultato, codice: mov.origin };
+    }
 
     function elaboraRispostaDockingDoors(porte) {
         if (!Array.isArray(porte)) return;
@@ -82,7 +134,7 @@
         "LYS": "FRANCIA", "SKG": "GRECIA", "ATH": "GRECIA", "DFT": "GERMANIA",
         "DFT*": "GERMANIA", "DNG": "GERMANIA", "DNG*": "NORIMBERGA", "VNZ": "VICENZA",
         "VE1": "VENEZIA", "XWT": "VIENNA", "WA1": "VARSAVIA", "VRN": "VERONA",
-        "BO2": "BOLOGNA", "BO1": "BOLOGNA", "B7Q": "BOLOGNA", "領7Q": "BOLOGNA", "PSR": "BOLOGNA",
+        "BO2": "BOLOGNA", "BO1": "BOLOGNA", "B7Q": "BOLOGNA", "PSR": "BOLOGNA",
         "ZRO": "BOLOGNA", "BZQ": "BELGIO", "QAR": "OLANDA", "QAL": "ALEX",
         "QVA": "VARESE", "MM1": "MILANO-MEGA", "MILA": "MILANO NEW", "ISV": "SAVONA",
         "IOE": "OMEGNA", "IBD": "BASSANO", "MDA": "MODENA", "PMF": "PARMA",
@@ -90,19 +142,19 @@
         "CUF": "CUNEO", "IBU": "BUSTO", "ICM": "COMO", "ILJ": "LECCO",
         "IPO": "PERO", "RNV": "NOVARA", "IMR": "NOVARA", "MXP": "MALPENSA",
         "MIL": "PESCHIERA", "VCE": "VENEZIA", "LJU": "SLOVENIA", "ZRH": "SVIZZERA",
-        "ECL": "FRANCIA", "B8Y": "BERGAMO", "M1S": "MILANO", "Q5M": "MILANO",
+        "ECL": "FRANCIA", "B8Y": "BERGAMO", "M1S": "MILANO", "Q5M": "MILANO", "AT21": "MIROGLIO", "KCW": "CROAZIA",
     };
 
     const CATEGORIE = [
-        { nome: "Import di Prima", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 30, codici: ["DNG", "QAR", "XWT", "MAD", "WA1", "BZQ", "MV9", "BCN"] },
+        { nome: "Import di Prima", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 30, codici: ["DNG", "QAR", "XWT", "MAD", "WA1", "BZQ", "MV9", "BCN", "DFT", "MXP"] },
         { nome: "Clienti Domestic", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 45, codici: ["AOS1", "ESSENZ", "SATCI", "GAMESTOP", "AT21", "CEMB", "RUBI", "PJLO", "COWA", "HILT", "INCO", "PENT", "LIVA", "RUNN", "PNT1", "TRAS", "COVD"] },
-        { nome: "Filiali per Sud", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 45, codici: ["ISV", "IOE"] },
+        { nome: "Filiali per Sud", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 45, codici: ["ISV", "IOE", "PRG"] },
         { nome: "Import Prima Downgradato", turno: "Primo Shift", cutoffOre: 23, cutoffMin: 45, codici: ["HNJ", "DNG*", "DFT*", "BCN", "ECL", "LUG"] },
         { nome: "Filiali per Nord Mix Italia", turno: "Primo Shift", cutoffOre: 23, cutoffMin: 45, codici: ["CUF", "OS3", "IBU", "IPO", "ICM", "RNV", "ILJ", "QVA", "QAL", "BEA", "BRG", "MZ1", "GOA", "OSO", "B8Y", "M1S", "TO1", "ZD1", "MIL"] },
         { nome: "Filiali per Export", turno: "Secondo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["VBS", "MM1", "VE1", "IBD", "REM", "BO1", "QPA", "VRN", "MDA", "PMF", "IIM"] },
         { nome: "Clienti International", turno: "Primo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["LIVA", "GEWI", "MASE", "APLE", "UFAL", "GDEC"] },
         { nome: "Filiali Divisione per 07", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["BRG", "IPO", "MZ1", "IBU", "TO1", "MM1", "VRN", "VNZ", "TV1", "VE1"] },
-        { nome: "Import Seconda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH"] },
+        { nome: "Import Seconda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH", "KCW"] },
         { nome: "Hub 07 Nord", turno: "Secondo Shift", cutoffOre: 5, cutoffMin: 30, codici: ["BO2", "PD2", "FC5", "PSA", "ZRO"] },
         { nome: "Hub Export/Sud", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["AN6", "FIA", "NC3", "NT3", "GDEC", "COFR", "UFAL", "APLE"] },
         { nome: "Import Anticipi", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["LYS", "MRS", "NT3", "BA5"] }
@@ -481,66 +533,71 @@
 
     function scansionaBaieScarico(panel) {
         const headerHtml = '<div style="padding:6px 8px 3px;font-size:11px;font-weight:bold;text-transform:uppercase;opacity:0.6;letter-spacing:0.5px;font-family:Roboto,sans-serif;">SCARICO</div>';
-        const unitElements = document.querySelectorAll(".arrival_units");
-
-        if (unitElements.length > 0) {
-            const gruppi = new Map();
-            const ora = new Date();
-
-            unitElements.forEach((el) => {
-                const originEl = el.querySelector(".inbound-origin-en-route, .inbound-origin");
-                const arrivalEl = el.querySelector(".arrival-time-en-route, .arrival-time");
-                if (!originEl || !arrivalEl) return;
-
-                const codiceOrigine = estraiCodiceGrezzo(originEl);
-                const testoArrivo = arrivalEl.textContent.trim();
-                const localitaTradotta = codeMap[codiceOrigine] || codiceOrigine || "Unknown";
-                if (!codiceOrigine || testoArrivo.toUpperCase().includes("N/A")) return;
-
-                const arrivo = parseDataOraSlash(testoArrivo);
-                if (!arrivo) return;
-
-                const risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo);
-                if (!risultato) return;
-
-                const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
-                if (diffMinuti > SOGLIA_SCARICO_MINUTI) return;
-
-                const chiave = risultato.cat.nome;
-                if (!gruppi.has(chiave)) {
-                    gruppi.set(chiave, { turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
-                }
-                gruppi.get(chiave).baie.push({ nome: localitaTradotta, diffMinuti: diffMinuti });
-            });
-            renderPannelloScaricoConteggi(panel, gruppi, headerHtml);
-            return;
-        }
-
-        let baie = trovaBaieScaricoOccupate();
-        if (baie.length === 0) {
-            panel.innerHTML = headerHtml + '<div style="padding:6px 8px;opacity:0.7;font-family:Roboto,sans-serif;color:#FF7A00;">Nessun camion/baia trovato</div>';
-            return;
-        }
-
         const gruppi = new Map();
         const ora = new Date();
+        let trovatoQualcosa = false;
+
+        function aggiungiAlGruppo(risultato, localitaTradotta) {
+            const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
+            if (diffMinuti > SOGLIA_SCARICO_MINUTI || diffMinuti <= -30) return;
+            const chiave = risultato.cat.nome;
+            if (!gruppi.has(chiave)) {
+                gruppi.set(chiave, { turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
+            }
+            gruppi.get(chiave).baie.push(localitaTradotta);
+        }
+
+        // 1) Mezzi ancora "in arrivo" (non ancora agganciati in baia)
+        const unitElements = document.querySelectorAll(".arrival_units");
+        if (unitElements.length > 0) trovatoQualcosa = true;
+
+        unitElements.forEach((el) => {
+            const originEl = el.querySelector(".inbound-origin-en-route, .inbound-origin");
+            const arrivalEl = el.querySelector(".arrival-time-en-route, .arrival-time");
+            if (!originEl || !arrivalEl) return;
+
+            const codiceOrigine = estraiCodiceGrezzo(originEl);
+            const testoArrivo = arrivalEl.textContent.trim();
+            const localitaTradotta = codeMap[codiceOrigine] || codiceOrigine || "Unknown";
+            if (!codiceOrigine || testoArrivo.toUpperCase().includes("N/A")) return;
+
+            const arrivo = parseDataOraSlash(testoArrivo);
+            if (!arrivo) return;
+
+            const risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo);
+            if (!risultato) return;
+
+            aggiungiAlGruppo(risultato, localitaTradotta);
+        });
+
+        // 2) Mezzi GIÀ agganciati in baia di scarico (stessa logica del Carico/Trip Details)
+        // Nota: leggiCutoffBaiaCorrente() legge il pannello Trip Details attualmente
+        // visibile in pagina. Se sono aperte/visibili più baie contemporaneamente andrà
+        // richiamato per ciascuna selezionando prima la baia corrispondente.
+        const baie = trovaBaieScaricoOccupate();
+        if (baie.length > 0) trovatoQualcosa = true;
+
         for (const baia of baie) {
-            assicuraTabInbound();
-            const infoCutoff = leggiCutoffBaiaCorrente();
+            // 2a) Preciso: origine + orario schedulato incrociati via unitId (nessuna dipendenza da pannelli aperti)
+            let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
+
+            // 2b) Fallback: legge il pannello Trip Details attualmente visibile (solo se la cache non ha ancora dati)
+            if (!infoCutoff) {
+                assicuraTabInbound();
+                infoCutoff = leggiCutoffBaiaCorrente();
+            }
             if (!infoCutoff) continue;
 
             const risultato = infoCutoff.cutoff;
             const codiceOrigine = infoCutoff.codice;
             const localitaTradotta = codeMap[codiceOrigine] || codiceOrigine;
 
-            const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
-            if (diffMinuti > SOGLIA_SCARICO_MINUTI) continue;
+            aggiungiAlGruppo(risultato, localitaTradotta);
+        }
 
-            const chiave = risultato.cat.nome;
-            if (!gruppi.has(chiave)) {
-                gruppi.set(chiave, { turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
-            }
-            gruppi.get(chiave).baie.push({ nome: localitaTradotta, diffMinuti: diffMinuti });
+        if (!trovatoQualcosa) {
+            panel.innerHTML = headerHtml + '<div style="padding:6px 8px;opacity:0.7;font-family:Roboto,sans-serif;color:#FF7A00;">Nessun camion/baia trovato</div>';
+            return;
         }
         renderPannelloScaricoConteggi(panel, gruppi, headerHtml);
     }
@@ -552,20 +609,16 @@
         }
         const voci = [...gruppi.entries()].sort((a, b) => a[1].orario.getTime() - b[1].orario.getTime());
         let html = headerHtml;
-        const oraRender = new Date();
         voci.forEach(([nome, info]) => {
             const hh = String(info.orario.getHours()).padStart(2, "0");
             const mm = String(info.orario.getMinutes()).padStart(2, "0");
-            const diffGruppo = (info.orario.getTime() - oraRender.getTime()) / 60000;
-            const classeDot = diffGruppo <= 30 ? "tnt-dot-rosso" : "tnt-dot-giallo";
-            const listaBaie = info.baie.map((b) => b.diffMinuti < 0 ? b.nome + " (in ritardo)" : b.nome).join(", ");
             html += '<div style="padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.1);font-family:Roboto,sans-serif;">'
                 + '<div style="display:flex;align-items:center;">'
-                + '<span class="' + classeDot + '"></span>'
+                + '<span class="tnt-dot-giallo"></span>'
                 + '<span style="flex:1;color:#FF7A00;font-weight:bold;">' + nome + ' (' + info.baie.length + ')</span>'
                 + '<span style="font-size:12px;color:#FF7A00;font-weight:bold;">' + hh + ':' + mm + '</span>'
                 + '</div>'
-                + '<div style="font-size:11px;color:#FF7A00;opacity:0.7;margin-left:17px;">' + info.turno + ' · Unità: ' + listaBaie + '</div>'
+                + '<div style="font-size:11px;color:#FF7A00;opacity:0.7;margin-left:17px;">' + info.turno + ' · Unità: ' + info.baie.join(", ") + '</div>'
                 + '</div>';
         });
         panel.innerHTML = html;
