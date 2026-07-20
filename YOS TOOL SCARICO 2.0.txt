@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         YOS TOOL SCARICO 4.5
+// @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      4.5
-// @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report Turno CSV (Posizionamento dopo Help)
+// @version      2.0
+// @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report Turno CSV
 // @author       Samuele Gibin
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
