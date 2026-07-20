@@ -1,14 +1,806 @@
 // ==UserScript==
-// @name         YOS TOOL SCARICO 4.6
+// @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      4.6
-// @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report Turno CSV (Posizionamento sotto Orologio Giallo)
+// @version      2.1
+// @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report Turno CSV
 // @author       Samuele Gibin
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
 // @downloadURL  https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
 // ==/UserScript==
+
+(function () {
+    'use strict';
+
+    (function interceptaDockingDoors() {
+        const origOpen = XMLHttpRequest.prototype.open;
+        const origSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function (method, url) {
+            this._tntUrl = url;
+            return origOpen.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function (body) {
+            this.addEventListener("load", function () {
+                 try {
+                    if (this._tntUrl && String(this._tntUrl).indexOf("dockingDoors") !== -1) {
+                        elaboraRispostaDockingDoors(JSON.parse(this.responseText));
+                        return;
+                    }
+                } catch (e) {}
+                try {
+                    const dati = JSON.parse(this.responseText);
+                    if (sembraListaMovimenti(dati)) elaboreRispostaMovimenti(dati);
+                } catch (e) {}
+            });
+            return origSend.apply(this, arguments);
+        };
+    })();
+
+    const cacheMovimentiPerUnit = new Map();
+
+    function sembraListaMovimenti(dati) {
+        return Array.isArray(dati) && dati.length > 0 && dati[0] && typeof dati[0] === "object"
+            && "movementId" in dati[0] && Array.isArray(dati[0].units) && "origin" in dati[0];
+    }
+
+    function elaboreRispostaMovimenti(movimenti) {
+        movimenti.forEach((m) => {
+            if (!m || !Array.isArray(m.units)) return;
+            m.units.forEach((u) => {
+                if (!u || !u.unitId) return;
+                cacheMovimentiPerUnit.set(String(u.unitId), {
+                    origin: m.origin,
+                    destination: m.destination,
+                    scheduleArrival: m.scheduleArrival,
+                    estimatedArrival: m.estimatedArrival,
+                    actualArrival: m.actualArrival,
+                    movementName: m.movementName,
+                    tripTourDescription: m.trip ? m.trip.tripTourDescription : ""
+                });
+            });
+        });
+    }
+
+    function calcolaCutoffDaCacheMovimenti(doorNumber) {
+        const arrivi = caricaArriviBaia();
+        const voce = arrivi[doorNumber];
+        if (!voce || !voce.unitId) return null;
+        const mov = cacheMovimentiPerUnit.get(String(voce.unitId));
+        if (!mov || !mov.origin) return null;
+        const arrivoIso = mov.scheduleArrival || mov.estimatedArrival;
+        if (!arrivoIso) return null;
+        const arrivo = new Date(arrivoIso);
+        if (isNaN(arrivo.getTime())) return null;
+        const risultato = calcolaCutoffPerCodice(mov.origin, arrivo);
+        if (!risultato) return null;
+        return { cutoff: risultato, codice: mov.origin };
+    }
+
+    function elaboraRispostaDockingDoors(porte) {
+        if (!Array.isArray(porte)) return;
+        const arrivi = caricaArriviBaia();
+        let modificato = false;
+        porte.forEach((porta) => {
+            const doorNumber = porta && porta.doorName;
+            if (!doorNumber) return;
+            const unit = porta.unitDTO;
+            if (porta.status !== "OCCUPIED" || !unit) {
+                if (arrivi[doorNumber]) {
+                    delete arrivi[doorNumber];
+                    modificato = true;
+                }
+                return;
+            }
+            const unitId = unit.unitId;
+            const esistente = arrivi[doorNumber];
+            if (!esistente || esistente.unitId !== unitId || unit.currentAction === "START_UNLOADING") {
+                let orario;
+                if (unit.currentAction === "START_UNLOADING" && (unit.updatedDateTimestamp || unit.updatedDate)) {
+                    orario = unit.updatedDateTimestamp || unit.updatedDate;
+                } else if (unit.currentAction === "LOCATION_ASSIGNED" && (unit.updatedDateTimestamp || unit.updatedDate)) {
+                    orario = unit.updatedDateTimestamp || unit.updatedDate;
+                } else {
+                    orario = new Date().toISOString();
+                }
+                arrivi[doorNumber] = { unitId: unitId, orario: orario };
+                modificato = true;
+                
+                registraInStoricoReport(doorNumber, unitId, orario);
+            }
+        });
+        if (modificato) salvaArriviBaia(arrivi);
+    }
+
+    const codeMap = {
+        "BRG": "BERGAMO", "BCN": "BARCELLONA", "GOA": "GENOVA", "ZD1": "ZIBIDO",
+        "LUG": "LUGANO", "REM": "REGGIO EMILIA", "MAD": "MADRID", "HNJ": "HANNOVER",
+        "OS3": "ORBASSANO", "OSO": "SONDRIO", "TO1": "TORINO", "MRS": "MARSIGLIA",
+        "TV1": "TREVISO", "QPA": "PADOVA", "PD2": "PADOVA", "FIA": "FIANO",
+        "FC5": "FIRENZE", "AN6": "ANCONA", "BA5": "BARI", "NC3": "NAPOLI-C",
+        "NT3": "NAPOLI-T", "PSA": "PISA", "PRG": "PRAGA", "MV9": "FRANCIA",
+        "LYS": "FRANCIA", "SKG": "GRECIA", "ATH": "GRECIA", "DFT": "GERMANIA",
+        "DFT*": "GERMANIA", "DNG": "GERMANIA", "DNG*": "NORIMBERGA", "VNZ": "VICENZA",
+        "VE1": "VENEZIA", "XWT": "VIENNA", "WA1": "VARSAVIA", "VRN": "VERONA",
+        "BO2": "BOLOGNA", "BO1": "BOLOGNA", "B7Q": "BOLOGNA", "PSR": "BOLOGNA",
+        "ZRO": "BOLOGNA", "BZQ": "BELGIO", "QAR": "OLANDA", "QAL": "ALEX",
+        "QVA": "VARESE", "MM1": "MILANO-MEGA", "MILA": "MILANO NEW", "ISV": "SAVONA",
+        "IOE": "OMEGNA", "IBD": "BASSANO", "MDA": "MODENA", "PMF": "PARMA",
+        "BEA": "BIELLA", "MZ1": "MONZA", "IIM": "IBERIA", "VBS": "BRESCIA",
+        "CUF": "CUNEO", "IBU": "BUSTO", "ICM": "COMO", "ILJ": "LECCO",
+        "IPO": "PERO", "RNV": "NOVARA", "IMR": "NOVARA", "MXP": "MALPENSA",
+        "MIL": "PESCHIERA", "VCE": "VENEZIA", "LJU": "SLOVENIA", "ZRH": "SVIZZERA",
+        "ECL": "FRANCIA", "B8Y": "BERGAMO", "M1S": "MILANO", "Q5M": "MILANO", "AT21": "MIROGLIO", "KCW": "CROAZIA",
+    };
+
+    const CATEGORIE = [
+        { nome: "Import di Prima", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 30, codici: ["DNG", "QAR", "XWT", "MAD", "WA1", "BZQ", "MV9", "BCN", "DFT", "MXP"] },
+        { nome: "Clienti Domestic", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 45, codici: ["AOS1", "ESSENZ", "SATCI", "GAMESTOP", "AT21", "CEMB", "RUBI", "PJLO", "COWA", "HILT", "INCO", "PENT", "LIVA", "RUNN", "PNT1", "TRAS", "COVD"] },
+        { nome: "Filiali per Sud", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 45, codici: ["ISV", "IOE", "PRG"] },
+        { nome: "Import Prima Downgradato", turno: "Primo Shift", cutoffOre: 23, cutoffMin: 45, codici: ["HNJ", "DNG*", "DFT*", "BCN", "ECL", "LUG"] },
+        { nome: "Filiali per Nord Mix Italia", turno: "Primo Shift", cutoffOre: 23, cutoffMin: 45, codici: ["CUF", "OS3", "IBU", "IPO", "ICM", "RNV", "ILJ", "QVA", "QAL", "BEA", "BRG", "MZ1", "GOA", "OSO", "B8Y", "M1S", "TO1", "ZD1", "MIL"] },
+        { nome: "Filiali per Export", turno: "Secondo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["VBS", "MM1", "VE1", "IBD", "REM", "BO1", "QPA", "VRN", "MDA", "PMF", "IIM"] },
+        { nome: "Clienti International", turno: "Primo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["LIVA", "GEWI", "MASE", "APLE", "UFAL", "GDEC"] },
+        { nome: "Filiali Divisione per 07", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["BRG", "IPO", "MZ1", "IBU", "TO1", "MM1", "VRN", "VNZ", "TV1", "VE1"] },
+        { nome: "Import Secunda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH", "KCW"] },
+        { nome: "Hub 07 Nord", turno: "Secondo Shift", cutoffOre: 5, cutoffMin: 30, codici: ["BO2", "PD2", "FC5", "PSA", "ZRO"] },
+        { nome: "Hub Export/Sud", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["AN6", "FIA", "NC3", "NT3", "GDEC", "COFR", "UFAL", "APLE"] },
+        { nome: "Import Anticipi", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["LYS", "MRS", "NT3", "BA5"] }
+    ];
+    const SOGLIA_OUTBOUND_MINUTI = 300;
+    const SOGLIA_SCARICO_MINUTI = 300;
+
+    function categoriaBaia(door) {
+        if (/^P/i.test(door)) return "Parcheggio";
+        const n = parseInt(door, 10);
+        if (!isNaN(n)) {
+            const inScarico = (n >= 101 && n <= 107) || (n >= 10 && n <= 14) || (n >= 201 && n <= 207) || (n >= 601 && n <= 609) || (n >= 501 && n <= 509);
+            if (inScarico) return "Scarico";
+            if (n >= 301 && n <= 456) return "Carico";
+        }
+        return "Freight";
+    }
+
+    function calcolaCutoffPerCodice(codice, arrivo) {
+        const candidati = CATEGORIE.filter((c) => c.codici.includes(codice));
+        if (candidati.length === 0) return null;
+        const choices = [];
+        candidati.forEach((cat) => {
+            for (let offset = -1; offset <= 2; offset++) {
+                const d = new Date(arrivo.getFullYear(), arrivo.getMonth(), arrivo.getDate() + offset, cat.cutoffOre, cat.cutoffMin, 0, 0);
+                if (d.getTime() >= arrivo.getTime()) {
+                    choices.push({ cat: cat, cutoffDate: d });
+                }
+            }
+        });
+        if (choices.length === 0) return null;
+        choices.sort((a, b) => a.cutoffDate.getTime() - b.cutoffDate.getTime());
+        for (let i = 0; i < choices.length; i++) {
+            const diffMinutiArrivoCutoff = (choices[i].cutoffDate.getTime() - arrivo.getTime()) / 60000;
+            if (diffMinutiArrivoCutoff >= 150) {
+                return choices[i];
+            }
+        }
+        return choices[0];
+    }
+
+    const stileBlink = document.createElement("style");
+    stileBlink.textContent = "@keyframes tntBlinkRosso{0%,100%{opacity:1;}50%{opacity:0.15;}}.tnt-dot-rosso{display:inline-block;width:9px;height:9px;border-radius:50%;background:#ff3b30;margin-right:8px;animation:tntBlinkRosso 1s infinite;}.tnt-dot-giallo{display:inline-block;width:9px;height:9px;border-radius:50%;background:#ffcc00;margin-right:8px;animation:tntBlinkRosso 1.4s infinite;}";
+    document.head.appendChild(stileBlink);
+
+    const TARGET_SELECTOR = ".door-info__movmt-value, .inbound-origin-en-route, .inbound-origin";
+    const CODE_ATTR = "data-tnt-code";
+    function traduciBlocco(el) {
+        let textNode = null;
+        for (const child of el.childNodes) {
+            if (child.nodeType === 3 && child.nodeValue.trim() !== "") {
+                textNode = child;
+                break;
+            }
+        }
+        if (!textNode) return;
+        const code = textNode.nodeValue.trim();
+        if (el.getAttribute(CODE_ATTR) === code) return;
+        el.setAttribute(CODE_ATTR, code);
+        const vecchiaTraduzione = el.querySelector(".tnt-translation");
+        if (vecchiaTraduzione) vecchiaTraduzione.remove();
+        const parola = codeMap[code];
+        if (!parola) return;
+        const span = document.createElement("span");
+        span.className = "tnt-translation";
+        span.textContent = " (" + parola + ")";
+        span.style.cssText = "color:#FF7A00; font-weight:bold; font-family:Roboto,sans-serif; font-size:inherit; white-space:nowrap;";
+        el.appendChild(span);
+    }
+
+    function scanBlocchi(root) {
+        if (root.nodeType !== 1) return;
+        if (root.matches && root.matches(TARGET_SELECTOR)) traduciBlocco(root);
+        if (root.querySelectorAll) root.querySelectorAll(TARGET_SELECTOR).forEach(traduciBlocco);
+    }
+
+    function trovaValorePerChiave(root, chiave) {
+        const keys = root.querySelectorAll(".door-info__movmt-key");
+        for (const k of keys) {
+            if (k.textContent.trim() === chiave) {
+                const col = k.closest(".col-4, .col-6");
+                return col ? col.querySelector(".door-info__movmt-value") : null;
+            }
+        }
+        return null;
+    }
+
+    function estraiCodiceGrezzo(valueEl) {
+        if (!valueEl) return null;
+        if (valueEl.dataset && valueEl.dataset.tntCode) return valueEl.dataset.tntCode.trim();
+        const clone = valueEl.cloneNode(true);
+        const trad = clone.querySelector(".tnt-translation");
+        if (trad) trad.remove();
+        return clone.textContent.trim();
+    }
+
+    function parseDataOraSlash(testo) {
+        const m = testo.trim().match(/(\d{2})\/(\d{2})\s+(\d{2}):(\d{2})/);
+        if (!m) return null;
+        const giorno = parseInt(m[1], 10), mese = parseInt(m[2], 10), ore = parseInt(m[3], 10), min = parseInt(m[4], 10);
+        return new Date(new Date().getFullYear(), mese - 1, giorno, ore, min);
+    }
+
+    function creaColTurno(chiaveTesto, valoreTesto, colClass = "col-4") {
+        const col = document.createElement("div");
+        col.className = colClass;
+        const key = document.createElement("div");
+        key.className = "door-info__movmt-key";
+        key.textContent = chiaveTesto;
+        key.style.cssText = "color:#FF7A00; font-family:Roboto,sans-serif;";
+        const divd = document.createElement("div");
+        divd.className = "door-info__divd-mvmt";
+        const val = document.createElement("div");
+        val.className = "door-info__movmt-value";
+        val.textContent = valoreTesto;
+        val.style.cssText = "color:#FF7A00; font-weight:bold; font-family:Roboto,sans-serif; font-size:15px;";
+        col.appendChild(key);
+        col.appendChild(divd);
+        col.appendChild(val);
+        return col;
+    }
+
+    function processaTripDetails() {
+        const contenitori = document.querySelectorAll(".door-info__movmt-no-left-padding");
+        contenitori.forEach((contenitore) => {
+            try {
+                const tripDetails = contenitore.querySelector(".door-info__trip-details");
+                const sezione = contenitore.querySelector(".door-info__movmt-section");
+                if (!tripDetails || !sezione) return;
+                const selezionato = tripDetails.querySelector(".door-info__header--nav-text--selected");
+                if (!selezionato || selezionato.textContent.trim() !== "INBOUND") {
+                    const vecchia = sezione.querySelector(".tnt-turno-row");
+                    if (vecchia) vecchia.remove();
+                    sezione.removeAttribute("data-tnt-turno-key");
+                    const vecchiaArrivo = contenitore.querySelector(".tnt-custom-info-row");
+                    if (vecchiaArrivo) vecchiaArrivo.remove();
+                    return;
+                }
+                const origineEl = trovaValorePerChiave(sezione, "Origin");
+                const arrivoEl = trovaValorePerChiave(sezione, "Sched. Arrival");
+                let risultato = null;
+                let codiceOrigine = null;
+                let testoArrivo = "";
+                if (origineEl && arrivoEl) {
+                    codiceOrigine = estraiCodiceGrezzo(origineEl);
+                    testoArrivo = arrivoEl.textContent.trim();
+                    if (codiceOrigine && !testoArrivo.toUpperCase().includes("N/A")) {
+                        const arrivo = parseDataOraSlash(testoArrivo);
+                        if (arrivo) risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo);
+                    }
+                }
+                aggiornaRigaArrivoECountdown(contenitore, risultato);
+                if (!origineEl || !arrivoEl) return;
+                const chiave = codiceOrigine + "|" + testoArrivo;
+                if (sezione.getAttribute("data-tnt-turno-key") === chiave) return;
+                sezione.setAttribute("data-tnt-turno-key", chiave);
+                const vecchia = sezione.querySelector(".tnt-turno-row");
+                if (vecchia) vecchia.remove();
+                if (!codiceOrigine || testoArrivo.toUpperCase().includes("N/A")) return;
+                const riga = document.createElement("div");
+                riga.className = "row door-info__movmt-section-row tnt-turno-row";
+                if (risultato) {
+                    riga.appendChild(creaColTurno("Turno", risultato.cat.turno));
+                    riga.appendChild(creaColTurno("Tipo Cutoff", risultato.cat.nome));
+                    const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
+                    const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
+                    riga.appendChild(creaColTurno("Orario Cutoff", hh + ":" + mm));
+                } else {
+                    riga.appendChild(creaColTurno("Turno", "N/A"));
+                    riga.appendChild(creaColTurno("Tipo Cutoff", "N/A"));
+                    riga.appendChild(creaColTurno("Orario Cutoff", "N/A"));
+                }
+                sezione.appendChild(riga);
+            } catch (e) {}
+        });
+    }
+
+    function leggiOutboundInScadenza() {
+        const righe = document.querySelectorAll(".scheduled-root.outbound-task, .scheduled-root.highlight-task, .scheduled-root.highlight-undeparted-unit");
+        const risultati = [];
+        const ora = new Date();
+        righe.forEach((riga) => {
+            const doorEl = riga.querySelector(".outbound-door-number span");
+            const dataEl = riga.querySelector(".outbound-dates-position-change");
+            const destEl = riga.querySelector(".outbound-current-destination");
+            if (!doorEl || !dataEl) return;
+            const door = doorEl.textContent.trim();
+            const testo = dataEl.textContent.trim();
+            if (!testo || testo.toUpperCase().includes("N/A") || door === "-" || !door || categoriaBaia(door) === "Scarico") return;
+            const unitReady = riga.querySelector(".unit_ready_outline") || riga.classList.contains("unit_ready_outline");
+            const dockingBg = riga.querySelector('[id^="dockingBg_"]');
+            let isBlue = false;
+            if (dockingBg && dockingBg.style && dockingBg.style.backgroundColor) {
+                if (dockingBg.style.backgroundColor.replace(/\s+/g, "").indexOf("rgb(135,185,172)") !== -1) isBlue = true;
+            }
+            if (unitReady || isBlue) return;
+            const match = testo.match(/(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
+            if (!match) return;
+            const giorno = parseInt(match[1], 10), mese = parseInt(match[2], 10), ore = parseInt(match[3], 10), minuti = parseInt(match[4], 10);
+            const partenza = new Date(ora.getFullYear(), mese - 1, giorno, ore, minuti);
+            const pronto = new Date(partenza.getTime() - 20 * 60000);
+            const diffMinuti = (pronto.getTime() - ora.getTime()) / 60000;
+            if (diffMinuti <= SOGLIA_OUTBOUND_MINUTI && diffMinuti > -60) {
+                risultati.push({ door, destinazione: destEl ? destEl.textContent.trim() : "", diffMinuti, categoria: categoriaBaia(door) });
+            }
+        });
+        risultati.sort((a, b) => a.diffMinuti - b.diffMinuti);
+        const visti = new Set();
+        return risultati.filter((r) => {
+            const chiave = r.door + "|" + r.destinazione;
+            if (visti.has(chiave)) return false;
+            visti.add(chiave);
+            return true;
+        });
+    }
+
+    const DOOR_NUM_SELECTOR_SCARICO = ".door_number, .west_door_number, .east_door_number, .reverse_door_number";
+    function trovaBaieScaricoOccupate() {
+        const risultati = [];
+        document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO).forEach((numEl) => {
+            const span = numEl.querySelector("span");
+            if (!span) return;
+            const doorNumber = span.textContent.trim();
+            if (!doorNumber || categoriaBaia(doorNumber) !== "Scarico") return;
+            const wrapper = numEl.closest('[id^="unit_"]');
+            if (!wrapper) return;
+            const container = wrapper.querySelector('[id^="container_"].unit-assigned');
+            if (!container) return;
+            risultati.push({ doorNumber, container });
+        });
+        return risultati;
+    }
+
+    const STORAGE_KEY_ARRIVI = "tnt_arrivi_baia_scarico_v1";
+    const STORAGE_KEY_STORICO = "tnt_storico_report_scarico_v1";
+    const assenzeConsecutive = new Map();
+    let baiaSelezionata = null;
+
+    function caricaArriviBaia() {
+        try { const raw = localStorage.getItem(STORAGE_KEY_ARRIVI); return raw ? JSON.parse(raw) : {}; } catch (e) { return {}; }
+    }
+    function salvaArriviBaia(dati) {
+        try { localStorage.setItem(STORAGE_KEY_ARRIVI, JSON.stringify(dati)); } catch (e) {}
+    }
+
+    function caricaStoricoReport() {
+        try { const raw = localStorage.getItem(STORAGE_KEY_STORICO); return raw ? JSON.parse(raw) : []; } catch (e) { return []; }
+    }
+    function salvaStoricoReport(dati) {
+        try { localStorage.setItem(STORAGE_KEY_STORICO, JSON.stringify(dati)); } catch (e) {}
+    }
+
+    function registraInStoricoReport(doorNumber, unitId, orarioIso) {
+        const storico = caricaStoricoReport();
+        const esisteGia = storico.some(item => item.doorNumber === doorNumber && item.unitId === unitId);
+        if (esisteGia) return;
+
+        const dataArrivo = new Date(orarioIso);
+        const orarioFormattato = String(dataArrivo.getHours()).padStart(2, "0") + ":" + String(dataArrivo.getMinutes()).padStart(2, "0");
+        const dataFormattata = String(dataArrivo.getDate()).padStart(2, "0") + "/" + String(dataArrivo.getMonth() + 1).padStart(2, "0");
+
+        let codiceOrigine = "N/A";
+        let localita = "N/A";
+        let viaggio = "N/A";
+        let cutoffOrario = "N/A";
+        let cutoffTurno = "N/A";
+        let cutoffTipo = "N/A";
+
+        if (unitId) {
+            const mov = cacheMovimentiPerUnit.get(String(unitId));
+            if (mov) {
+                codiceOrigine = mov.origin || "N/A";
+                localita = codeMap[codiceOrigine] || "N/A";
+                viaggio = mov.movementName || "N/A";
+                if (mov.tripTourDescription) viaggio += " (" + mov.tripTourDescription + ")";
+
+                const arrivoIso = mov.scheduleArrival || mov.estimatedArrival;
+                if (arrivoIso) {
+                    const arrivoDate = new Date(arrivoIso);
+                    const res = calcolaCutoffPerCodice(codiceOrigine, arrivoDate);
+                    if (res) {
+                        cutoffOrario = String(res.cutoffDate.getHours()).padStart(2, "0") + ":" + String(res.cutoffDate.getMinutes()).padStart(2, "0");
+                        cutoffTurno = res.cat.turno;
+                        cutoffTipo = res.cat.nome;
+                    }
+                }
+            }
+        }
+
+        storico.push({
+            data: dataFormattata,
+            doorNumber,
+            unitId: unitId || "N/A",
+            orarioArrivo: orarioFormattato,
+            codiceOrigine,
+            localita,
+            viaggio,
+            cutoffOrario,
+            cutoffTurno,
+            cutoffTipo
+        });
+        salvaStoricoReport(storico);
+    }
+
+    function scaricaReportCSV() {
+        const storico = caricaStoricoReport();
+        if (storico.length === 0) {
+            alert("Nessun dato registrato in questo turno per il report.");
+            return;
+        }
+
+        let csvContent = "data:text/csv;charset=utf-8,";
+        csvContent += "Data;Baia;Unit ID;Ora Arrivo Reale;Codice;Localita;Info Viaggio;Ora Cutoff;Turno;Categoria Cutoff\n";
+
+        storico.forEach(r => {
+            const riga = `${r.data};${r.doorNumber};${r.unitId};${r.orarioArrivo};${r.codiceOrigine};${r.localita};${r.viaggio};${r.cutoffOrario};${r.cutoffTurno};${r.cutoffTipo}`;
+            csvContent += riga + "\n";
+        });
+
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `REPORT_TURNO_YOS_${new Date().toISOString().slice(0,10)}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+
+    function aggiornaTracciamentoArrivi() {
+        const arrivi = caricaArriviBaia();
+        let modificato = false;
+        document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO).forEach((numEl) => {
+            const span = numEl.querySelector("span");
+            if (!span) return;
+            const doorNumber = span.textContent.trim();
+            if (!doorNumber || categoriaBaia(doorNumber) !== "Scarico") return;
+            const wrapper = numEl.closest('[id^="unit_"]');
+            if (!wrapper) return;
+            const container = wrapper.querySelector('[id^="container_"].unit-assigned');
+            if (container) {
+                assenzeConsecutive.set(doorNumber, 0);
+                if (!arrivi[doorNumber]) {
+                    arrivi[doorNumber] = { unitId: null, orario: new Date().toISOString() };
+                    modificato = true;
+                }
+            } else {
+                const conteggio = (assenzeConsecutive.get(doorNumber) || 0) + 1;
+                assenzeConsecutive.set(doorNumber, conteggio);
+                if (conteggio >= 2 && arrivi[doorNumber]) {
+                    delete arrivi[doorNumber];
+                    modificato = true;
+                }
+            }
+        });
+        if (modificato) salvaArriviBaia(arrivi);
+    }
+
+    function trovaRigaPerChiavi(ambito, chiavi) {
+        const keys = ambito.querySelectorAll(".door-info__movmt-key");
+        for (const k of keys) {
+            if (chiavi.includes(k.textContent.trim())) return k.closest(".row") || k.closest(".door-info__movmt-section-row");
+        }
+        return null;
+    }
+
+    function aggiornaRigaArrivoECountdown(ambito, risultato) {
+        const vecchia = ambito.querySelector(".tnt-custom-info-row");
+        if (vecchia) vecchia.remove();
+        const rigaRemarks = trovaRigaPerChiavi(ambito, ["Arrival Remarks", "YOS Remarks"]);
+        if (!rigaRemarks) return;
+        let valoreArrivo = "N/A";
+        if (baiaSelezionata) {
+            const arrivi = caricaArriviBaia();
+            const voce = arrivi[baiaSelezionata];
+            if (voce && voce.orario) {
+                const dataArrivo = new Date(voce.orario);
+                valoreArrivo = String(dataArrivo.getHours()).padStart(2, "0") + ":" + String(dataArrivo.getMinutes()).padStart(2, "0");
+            }
+        }
+        let valoreCountdown = "N/A";
+        if (risultato && risultato.cutoffDate) {
+            const diffMs = risultato.cutoffDate.getTime() - new Date().getTime();
+            if (diffMs > 0) {
+                const diffMinsTot = Math.floor(diffMs / 60000);
+                const ore = Math.floor(diffMinsTot / 60);
+                const minuti = diffMinsTot % 60;
+                valoreCountdown = ore > 0 ? `${ore}h ${minuti}m` : `${minuti}m`;
+            } else {
+                const diffMinsTot = Math.floor(Math.abs(diffMs) / 60000);
+                const ore = Math.floor(diffMinsTot / 60);
+                const minuti = diffMinsTot % 60;
+                valoreCountdown = `Scaduto da ${ore > 0 ? ore + 'h ' : ''}${minuti}m`;
+            }
+        }
+        const rigaNuova = document.createElement("div");
+        rigaNuova.className = "row door-info__movmt-section-row tnt-custom-info-row";
+        rigaNuova.style.marginTop = "10px";
+        const colArrivo = creaColTurno("Orario Arrivo Camion", valoreArrivo, "col-6");
+        const colCountdown = creaColTurno("Countdown Cutoff", valoreCountdown, "col-6");
+        const valSpan = colCountdown.querySelector(".door-info__movmt-value");
+        if (valSpan && risultato && risultato.cutoffDate) {
+            const diffMs = risultato.cutoffDate.getTime() - new Date().getTime();
+            if (diffMs < 0) valSpan.style.color = "#ff3b30";
+            else if (diffMs <= 30 * 60000) valSpan.style.color = "#ffcc00";
+            else valSpan.style.color = "#4cd964";
+        }
+        rigaNuova.appendChild(colArrivo);
+        rigaNuova.appendChild(colCountdown);
+        rigaRemarks.insertAdjacentElement("afterend", rigaNuova);
+    }
+
+    function assicuraTabInbound() {
+        const nav = document.querySelectorAll(".door-info__header--nav-text");
+        for (const el of nav) {
+            if (el.textContent.trim() === "INBOUND") {
+                if (!el.classList.contains("door-info__header--nav-text--selected")) el.click();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function leggiCutoffBaiaCorrente() {
+        const originClassEl = document.querySelector(".inbound-origin-en-route, .inbound-origin");
+        let codiceOrigine = null;
+        if (originClassEl && originClassEl.textContent.trim()) codiceOrigine = estraiCodiceGrezzo(originClassEl);
+        const contenitori = document.querySelectorAll(".door-info__movmt-no-left-padding");
+        for (const contenitore of contenitori) {
+            const sezione = contenitore.querySelector(".door-info__movmt-section");
+            if (!sezione) continue;
+            if (!codiceOrigine) codiceOrigine = estraiCodiceGrezzo(trovaValorePerChiave(sezione, "Origin"));
+            const arrivoEl = trovaValorePerChiave(sezione, "Sched. Arrival");
+            if (!arrivoEl || !codiceOrigine) continue;
+            const testoArrivo = arrivoEl.textContent.trim();
+            if (testoArrivo.toUpperCase().includes("N/A")) continue;
+            const arrivo = parseDataOraSlash(testoArrivo);
+            if (!arrivo) continue;
+            const cutoffRes = calcolaCutoffPerCodice(codiceOrigine, arrivo);
+            if (cutoffRes) return { cutoff: cutoffRes, codice: codiceOrigine };
+        }
+        return null;
+    }
+
+    function scansionaBaieScarico(panel) {
+        const headerHtml = '<div style="padding:6px 8px 3px;font-size:11px;font-weight:bold;text-transform:uppercase;opacity:0.6;letter-spacing:0.5px;font-family:Roboto,sans-serif;">SCARICO</div>';
+        const gruppi = new Map();
+        const ora = new Date();
+        let trovatoQualcosa = false;
+        function aggiungiAlGruppo(risultato, infoBaia) {
+            const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
+            if (diffMinuti > SOGLIA_SCARICO_MINUTI || diffMinuti <= -30) return;
+            const chiave = risultato.cat.nome;
+            if (!gruppi.has(chiave)) gruppi.set(chiave, { turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
+            gruppi.get(chiave).baie.push(infoBaia);
+        }
+        const unitElements = document.querySelectorAll(".arrival_units");
+        if (unitElements.length > 0) trovatoQualcosa = true;
+        unitElements.forEach((el) => {
+            const originEl = el.querySelector(".inbound-origin-en-route, .inbound-origin");
+            const arrivalEl = el.querySelector(".arrival-time-en-route, .arrival-time");
+            if (!originEl || !arrivalEl) return;
+            const codiceOrigine = estraiCodiceGrezzo(originEl);
+            const testoArrivo = arrivalEl.textContent.trim();
+            if (!codiceOrigine || testoArrivo.toUpperCase().includes("N/A")) return;
+            const arrivo = parseDataOraSlash(testoArrivo);
+            if (!arrivo) return;
+            const risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo);
+            if (!risultato) return;
+            const doorEl = el.querySelector(".door_number, .west_door_number, .east_door_number, .reverse_door_number");
+            aggiungiAlGruppo(risultato, doorEl ? doorEl.textContent.trim() : "");
+        });
+        const baie = trovaBaieScaricoOccupate();
+        if (baie.length > 0) trovatoQualcosa = true;
+        for (const baia of baie) {
+            let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
+            if (!infoCutoff) {
+                assicuraTabInbound();
+                infoCutoff = leggiCutoffBaiaCorrente();
+            }
+            if (!infoCutoff) continue;
+            aggiungiAlGruppo(infoCutoff.cutoff, baia.doorNumber);
+        }
+        if (!trovatoQualcosa) {
+            panel.innerHTML = headerHtml + '<div style="padding:6px 8px;opacity:0.7;font-family:Roboto,sans-serif;color:#FF7A00;">Nessun camion/baia trovato</div>';
+            return;
+        }
+        renderPannelloScaricoConteggi(panel, gruppi, headerHtml);
+    }
+
+    function renderPannelloScaricoConteggi(panel, gruppi, headerHtml) {
+        if (gruppi.size === 0) {
+            panel.innerHTML = headerHtml + '<div style="padding:6px 8px;opacity:0.7;font-family:Roboto,sans-serif;color:#FF7A00;">Nessuno scarico in scadenza</div>';
+            return;
+        }
+        const voci = [...gruppi.entries()].sort((a, b) => a[1].orario.getTime() - b[1].orario.getTime());
+        let html = headerHtml;
+        voci.forEach(([nome, info]) => {
+            const hh = String(info.orario.getHours()).padStart(2, "0");
+            const mm = String(info.orario.getMinutes()).padStart(2, "0");
+            const listaBaie = info.baie.filter(Boolean).join(", ");
+            html += '<div style="padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.1);font-family:Roboto,sans-serif;">'
+                + '<div style="display:flex;align-items:center;">'
+                + '<span class="tnt-dot-giallo"></span>'
+                + '<span style="flex:1;color:#FF7A00;font-weight:bold;">' + nome + ' (' + info.baie.length + ')</span>'
+                + '<span style="font-size:12px;color:#FF7A00;font-weight:bold;">' + hh + ':' + mm + '</span>'
+                + '</div>'
+                + '<div style="font-size:11px;color:#FF7A00;opacity:0.7;margin-left:17px;">Baie: ' + listaBaie + '</div>'
+                + '</div>';
+        });
+        panel.innerHTML = html;
+    }
+
+    function aggiornaPannelloOutbound() {
+        const panel = document.getElementById("tnt-orologio-panel");
+        if (!panel || panel.style.display === "none") return;
+        const risultati = leggiOutboundInScadenza();
+        const ordineCategorie = ["Carico", "Parcheggio", "Freight"];
+        const gruppi = { "Carico": [], "Parcheggio": [], "Freight": [] };
+        risultati.forEach((r) => { if(gruppi[r.categoria]) gruppi[r.categoria].push(r); });
+        let html = "";
+        ordineCategorie.forEach((cat) => {
+            const lista = gruppi[cat];
+            if (!lista || lista.length === 0) return;
+            html += '<div style="padding:6px 8px 3px;font-size:11px;font-weight:bold;text-transform:uppercase;opacity:0.6;letter-spacing:0.5px;font-family:Roboto,sans-serif;">' + cat + '</div>';
+            html += lista.map((r) => {
+                const minutiTesto = r.diffMinuti >= 0 ? Math.round(r.diffMinuti) + " min" : "In ritardo";
+                const classeDot = r.diffMinuti <= 30 ? "tnt-dot-rosso" : "tnt-dot-giallo";
+                return '<div style="display:flex;align-items:center;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.1);font-family:Roboto,sans-serif;">'
+                    + '<span class="' + classeDot + '"></span>'
+                    + '<span style="font-weight:bold;min-width:40px;color:#FF7A00;">' + r.door + '</span>'
+                    + '<span style="flex:1;color:#FF7A00;">' + r.destinazione + '</span>'
+                    + '<span style="opacity:0.8;font-size:12px;color:#FF7A00;font-weight:bold;">' + minutiTesto + '</span>'
+                    + '</div>';
+            }).join("");
+        });
+        panel.innerHTML = html || '<div style="padding:6px 8px;opacity:0.7;font-family:Roboto,sans-serif;color:#FF7A00;">Nessuna baia in scadenza</div>';
+    }
+
+    function creaIconaMenu(id, coloreCerchio, disegnoSvg) {
+        const iconaSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 46" width="46" height="46"><rect x="0" y="0" width="46" height="46" rx="10" fill="#47484a"/>' + disegnoSvg + '</svg>';
+        const btn = document.createElement("img");
+        btn.id = id;
+        btn.className = "cc-menu-button";
+        btn.src = "data:image/svg+xml;base64," + btoa(iconaSvg);
+        btn.style.cssText = "display:block;width:46px;height:46px;margin:16px 13px 0;cursor:pointer;user-select:none;";
+        return btn;
+    }
+
+    function creaPannello(id) {
+        const panel = document.createElement("div");
+        panel.id = id;
+        panel.style.cssText = "display:none;position:fixed;background:#2c2c2e;color:#fff;padding:6px;border-radius:6px;width:280px;z-index:99999;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:Roboto,sans-serif;";
+        document.body.appendChild(panel);
+        return panel;
+    }
+
+    function collegaClick(btn, panel, callbackAggiorna, offsetExtra = 0) {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (panel.style.display !== "none") {
+                panel.style.display = "none";
+                return;
+            }
+            const primoBottone = document.getElementById("tnt-orologio-btn");
+            const rectRiferimento = primoBottone ? primoBottone.getBoundingClientRect() : btn.getBoundingClientRect();
+            const rectCorrente = btn.getBoundingClientRect();
+            panel.style.top = rectRiferimento.top + "px";
+            panel.style.left = (rectCorrente.right + 8 + offsetExtra) + "px";
+            panel.style.display = "block";
+            callbackAggiorna();
+        });
+        panel.addEventListener("click", (e) => e.stopPropagation());
+    }
+
+    function initIcone() {
+        const menu = document.querySelector(".cc-hub-menu-panel");
+        if (!menu) return;
+        
+        let panelOrologio = document.getElementById("tnt-orologio-panel");
+        if (!document.getElementById("tnt-orologio-btn")) {
+            const disegnoOrologio = '<circle cx="23" cy="23" r="13" fill="none" stroke="#ffffff" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>';
+            const btn = creaIconaMenu("tnt-orologio-btn", "#ffffff", disegnoOrologio);
+            btn.title = "Unit Ready in scadenza (Outbound)";
+            menu.appendChild(btn);
+            panelOrologio = creaPannello("tnt-orologio-panel");
+            collegaClick(btn, panelOrologio, aggiornaPannelloOutbound, 0);
+        }
+        
+        if (!document.getElementById("tnt-orologio-scarico-btn")) {
+            const disegnoScarico = '<circle cx="23" cy="23" r="13" fill="none" stroke="#ffcc00" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="#ffcc00" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="#ffcc00" stroke-width="2" stroke-linecap="round"/>';
+            const btn2 = creaIconaMenu("tnt-orologio-scarico-btn", "#ffcc00", disegnoScarico);
+            btn2.title = "Carichi in scadenza cutoff (Scarico)";
+            menu.appendChild(btn2);
+            const panel2 = creaPannello("tnt-orologio-scarico-panel");
+            collegaClick(btn2, panel2, () => scansionaBaieScarico(panel2), 290);
+        }
+
+        // Inserimento del pulsante Report CSV direttamente dentro la barra laterale sotto il secondo orologio
+        if (!document.getElementById("tnt-btn-scarica-report")) {
+            const disegnoReport = '<rect x="15" y="13" width="16" height="20" rx="2" fill="none" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="18" x2="27" y2="18" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="23" x2="27" y2="23" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="28" x2="24" y2="28" stroke="#FF7A00" stroke-width="2"/>';
+            const btnReport = creaIconaMenu("tnt-btn-scarica-report", "#FF7A00", disegnoReport);
+            btnReport.title = "Scarica Report Turno CSV";
+            
+            btnReport.addEventListener("click", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                scaricaReportCSV();
+            });
+            menu.appendChild(btnReport);
+        }
+    }
+
+    document.addEventListener("click", (e) => {
+        const wrapper = e.target.closest('[id^="unit_"]');
+        if (!wrapper) return;
+        const numEl = wrapper.querySelector(DOOR_NUM_SELECTOR_SCARICO);
+        if (!numEl) return;
+        const span = numEl.querySelector("span");
+        if (!span) return;
+        const doorNumber = span.textContent.trim();
+        if (doorNumber) baiaSelezionata = doorNumber;
+    }, true);
+
+    try { scanBlocchi(document.body); } catch (e) {}
+    try { initIcone(); } catch (e) {}
+    try { aggiornaTracciamentoArrivi(); } catch (e) {}
+    try { processaTripDetails(); } catch (e) {}
+
+    let debounceTimer = null;
+    const nodiDaControllare = new Set();
+    function eseguiControlliPesanti() {
+        const nodi = Array.from(nodiDaControllare);
+        nodiDaControllare.clear();
+        try { nodi.forEach((n) => { if (document.body.contains(n)) scanBlocchi(n); }); } catch (e) {}
+        try { initIcone(); } catch (e) {}
+        try { aggiornaTracciamentoArrivi(); } catch (e) {}
+        try { processaTripDetails(); } catch (e) {}
+        try { aggiornaPannelloOutbound(); } catch (e) {}
+    }
+
+    const observer = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+            if (m.type === "childList") {
+                m.addedNodes.forEach((n) => { if (n.nodeType === 1) nodiDaControllare.add(n); });
+            } else if (m.type === "characterData" && m.target.parentElement) {
+                nodiDaControllare.add(m.target.parentElement);
+            } else if (m.type === "attributes" && m.target.nodeType === 1) {
+                nodiDaControllare.add(m.target);
+            }
+        }
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(eseguiControlliPesanti, 600);
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class"] });
+
+    setInterval(aggiornaTracciamentoArrivi, 5000);
+    setInterval(aggiornaPannelloOutbound, 15000);
+})();
 
 (function () {
     'use strict';
