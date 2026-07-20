@@ -30,7 +30,7 @@
                 } catch (e) {}
                 try {
                     const dati = JSON.parse(this.responseText);
-                    if (sembraListaMovimenti(dati)) elaboraRispostaMovimenti(dati);
+                    if (sembraListaMovimenti(dati)) elaboreRispostaMovimenti(dati);
                 } catch (e) {}
             });
             return origSend.apply(this, arguments);
@@ -44,7 +44,7 @@
             && "movementId" in dati[0] && Array.isArray(dati[0].units) && "origin" in dati[0];
     }
 
-    function elaboraRispostaMovimenti(movimenti) {
+    function elaboreRispostaMovimenti(movimenti) {
         movimenti.forEach((m) => {
             if (!m || !Array.isArray(m.units)) return;
             m.units.forEach((u) => {
@@ -74,7 +74,7 @@
         if (isNaN(arrivo.getTime())) return null;
         const risultato = calcolaCutoffPerCodice(mov.origin, arrivo);
         if (!risultato) return null;
-        return { cutoff: resultado, codice: mov.origin };
+        return { cutoff: risultato, codice: mov.origin };
     }
 
     function elaboraRispostaDockingDoors(porte) {
@@ -471,45 +471,6 @@
         document.body.removeChild(link);
     }
 
-    function inserisciTastoReport() {
-        if (document.getElementById("tnt-btn-scarica-report")) return;
-        
-        // Cerchiamo la voce nativa "Help" nel menu centrale
-        const helpMenu = document.querySelector(".help-menu");
-        if (!helpMenu || !helpMenu.parentElement) return;
-
-        // Creiamo la nuova voce della lista (li)
-        const liContainer = document.createElement("li");
-        liContainer.id = "tnt-btn-scarica-report";
-        liContainer.className = "help-menu"; // Eredita la classe per altezza e posizionamento corretto
-        liContainer.style.cssText = `
-            cursor: pointer;
-            user-select: none;
-            font-weight: bold;
-            color: #FF7A00 !important;
-            border: 1px solid rgba(255, 122, 0, 0.4);
-            padding: 2px 10px;
-            margin-left: 22px; /* Lascia dello spazio dopo Help */
-            margin-right: 5px;
-            border-radius: 4px;
-            background: rgba(255, 122, 0, 0.12);
-            display: inline-block;
-            transition: background 0.2s;
-        `;
-        
-        liContainer.textContent = "Report CSV";
-        
-        liContainer.addEventListener("mouseenter", () => liContainer.style.background = "rgba(255, 122, 0, 0.28)");
-        liContainer.addEventListener("mouseleave", () => liContainer.style.background = "rgba(255, 122, 0, 0.12)");
-        liContainer.addEventListener("click", (e) => {
-            e.preventDefault();
-            scaricaReportCSV();
-        });
-        
-        // La posizioniamo subito dopo "Help"
-        helpMenu.insertAdjacentElement("afterend", liContainer);
-    }
-
     function aggiornaTracciamentoArrivi() {
         const arrivi = caricaArriviBaia();
         let modificato = false;
@@ -759,6 +720,7 @@
     function initIcone() {
         const menu = document.querySelector(".cc-hub-menu-panel");
         if (!menu) return;
+        
         let panelOrologio = document.getElementById("tnt-orologio-panel");
         if (!document.getElementById("tnt-orologio-btn")) {
             const disegnoOrologio = '<circle cx="23" cy="23" r="13" fill="none" stroke="#ffffff" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>';
@@ -768,6 +730,7 @@
             panelOrologio = creaPannello("tnt-orologio-panel");
             collegaClick(btn, panelOrologio, aggiornaPannelloOutbound, 0);
         }
+        
         if (!document.getElementById("tnt-orologio-scarico-btn")) {
             const disegnoScarico = '<circle cx="23" cy="23" r="13" fill="none" stroke="#ffcc00" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="#ffcc00" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="#ffcc00" stroke-width="2" stroke-linecap="round"/>';
             const btn2 = creaIconaMenu("tnt-orologio-scarico-btn", "#ffcc00", disegnoScarico);
@@ -775,6 +738,20 @@
             menu.appendChild(btn2);
             const panel2 = creaPannello("tnt-orologio-scarico-panel");
             collegaClick(btn2, panel2, () => scansionaBaieScarico(panel2), 290);
+        }
+
+        // Inserimento del pulsante Report CSV direttamente dentro la barra laterale sotto il secondo orologio
+        if (!document.getElementById("tnt-btn-scarica-report")) {
+            const disegnoReport = '<rect x="15" y="13" width="16" height="20" rx="2" fill="none" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="18" x2="27" y2="18" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="23" x2="27" y2="23" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="28" x2="24" y2="28" stroke="#FF7A00" stroke-width="2"/>';
+            const btnReport = creaIconaMenu("tnt-btn-scarica-report", "#FF7A00", disegnoReport);
+            btnReport.title = "Scarica Report Turno CSV";
+            
+            btnReport.addEventListener("click", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                scaricaReportCSV();
+            });
+            menu.appendChild(btnReport);
         }
     }
 
@@ -791,7 +768,6 @@
 
     try { scanBlocchi(document.body); } catch (e) {}
     try { initIcone(); } catch (e) {}
-    try { inserisciTastoReport(); } catch (e) {}
     try { aggiornaTracciamentoArrivi(); } catch (e) {}
     try { processaTripDetails(); } catch (e) {}
 
@@ -802,7 +778,6 @@
         nodiDaControllare.clear();
         try { nodi.forEach((n) => { if (document.body.contains(n)) scanBlocchi(n); }); } catch (e) {}
         try { initIcone(); } catch (e) {}
-        try { inserisciTastoReport(); } catch (e) {}
         try { aggiornaTracciamentoArrivi(); } catch (e) {}
         try { processaTripDetails(); } catch (e) {}
         try { aggiornaPannelloOutbound(); } catch (e) {}
