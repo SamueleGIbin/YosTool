@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         YOS TOOL SCARICO 4.4
+// @name         YOS TOOL SCARICO 4.5
 // @namespace    http://tampermonkey.net/
-// @version      4.4
-// @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report Turno CSV (Posizionamento Flusso Centrale)
+// @version      4.5
+// @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report Turno CSV (Posizionamento dopo Help)
 // @author       Samuele Gibin
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -474,42 +474,40 @@
     function inserisciTastoReport() {
         if (document.getElementById("tnt-btn-scarica-report")) return;
         
-        // Troviamo il contenitore dei titoli centrale (es. "HUB OVERVIEW")
-        const targetCentrale = document.querySelector(".header__title-container");
-        if (!targetCentrale) return;
+        // Cerchiamo la voce nativa "Help" nel menu centrale
+        const helpMenu = document.querySelector(".help-menu");
+        if (!helpMenu || !helpMenu.parentElement) return;
 
-        const btnContainer = document.createElement("div");
-        btnContainer.id = "tnt-btn-scarica-report";
-        btnContainer.style.cssText = `
-            display: inline-flex; 
-            align-items: center; 
+        // Creiamo la nuova voce della lista (li)
+        const liContainer = document.createElement("li");
+        liContainer.id = "tnt-btn-scarica-report";
+        liContainer.className = "help-menu"; // Eredita la classe per altezza e posizionamento corretto
+        liContainer.style.cssText = `
             cursor: pointer;
             user-select: none;
-            margin-left: 20px;
-            vertical-align: middle;
-        `;
-        
-        const textSpan = document.createElement("span");
-        textSpan.textContent = "Report Turno CSV";
-        textSpan.style.cssText = `
-            color: #FF7A00; 
-            font-weight: bold; 
-            font-family: Roboto, sans-serif; 
-            font-size: 13px;
-            border: 1px solid #FF7A00;
-            padding: 4px 12px;
+            font-weight: bold;
+            color: #FF7A00 !important;
+            border: 1px solid rgba(255, 122, 0, 0.4);
+            padding: 2px 10px;
+            margin-left: 22px; /* Lascia dello spazio dopo Help */
+            margin-right: 5px;
             border-radius: 4px;
-            background: rgba(255, 122, 0, 0.15);
+            background: rgba(255, 122, 0, 0.12);
+            display: inline-block;
             transition: background 0.2s;
         `;
         
-        textSpan.addEventListener("mouseenter", () => textSpan.style.background = "rgba(255, 122, 0, 0.3)");
-        textSpan.addEventListener("mouseleave", () => textSpan.style.background = "rgba(255, 122, 0, 0.15)");
-
-        btnContainer.appendChild(textSpan);
-        btnContainer.addEventListener("click", scaricaReportCSV);
+        liContainer.textContent = "Report CSV";
         
-        targetCentrale.appendChild(btnContainer);
+        liContainer.addEventListener("mouseenter", () => liContainer.style.background = "rgba(255, 122, 0, 0.28)");
+        liContainer.addEventListener("mouseleave", () => liContainer.style.background = "rgba(255, 122, 0, 0.12)");
+        liContainer.addEventListener("click", (e) => {
+            e.preventDefault();
+            scaricaReportCSV();
+        });
+        
+        // La posizioniamo subito dopo "Help"
+        helpMenu.insertAdjacentElement("afterend", liContainer);
     }
 
     function aggiornaTracciamentoArrivi() {
