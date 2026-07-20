@@ -633,7 +633,8 @@
             if (!arrivo) return;
             const risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo);
             if (!risultato) return;
-            aggiungiAlGruppo(risultato, "");
+            // Nessuna baia assegnata: mostriamo il codice origine tra parentesi per identificare il camion
+            aggiungiAlGruppo(risultato, "(" + codiceOrigine + ")");
         });
         const unitElements = document.querySelectorAll(".arrival_units");
         if (unitElements.length > 0) trovatoQualcosa = true;
@@ -649,7 +650,7 @@
             const risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo);
             if (!risultato) return;
             const doorEl = el.querySelector(".door_number, .west_door_number, .east_door_number, .reverse_door_number");
-            aggiungiAlGruppo(risultato, doorEl ? doorEl.textContent.trim() : "");
+            aggiungiAlGruppo(risultato, doorEl ? doorEl.textContent.trim() : "(" + codiceOrigine + ")");
         });
         const baie = trovaBaieScaricoOccupate();
         if (baie.length > 0) trovatoQualcosa = true;
