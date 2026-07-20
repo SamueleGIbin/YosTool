@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.5
-// @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report Turno CSV (fix: cutoff/countdown errati per codici con una sola categoria; rimossa duplicazione dello script; lettura anche della vista Scheduled per il pannello scarico; camion senza baia mostrano il codice origine; le voci scadute restano visibili nel pannello scarico; wording "In ritardo di" al posto di "Scaduto da")
+// @version      2.6
+// @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report Turno CSV (fix: cutoff/countdown errati per codici con una sola categoria; rimossa duplicazione dello script; lettura anche della vista Scheduled per il pannello scarico; camion senza baia mostrano il codice origine; le voci scadute restano visibili nel pannello scarico; wording "In ritardo di" al posto di "Scaduto da"; NEW: il cutoff viene ora calcolato usando l'arrivo reale (Actual Arrival / arrivo reale alla baia) invece del solo Sched. Arrival, evitando cutoff "fantasma" gia' passati per i codici con cutoff nelle prime ore del mattino; NEW: regola dei 150 minuti di lavorazione - se tra l'arrivo reale alla baia e il cutoff assegnato mancano meno di 150 minuti, il camion slitta automaticamente al primo cutoff successivo (tra tutti quelli definiti) che garantisce almeno 150 minuti, marcato con asterisco e indicazione "cutoff originale -> nuovo cutoff per late arrival")
 // @author       Samuele Gibin
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -68,11 +68,22 @@
         if (!voce || !voce.unitId) return null;
         const mov = cacheMovimentiPerUnit.get(String(voce.unitId));
         if (!mov || !mov.origin) return null;
-        const arrivoIso = mov.scheduleArrival || mov.estimatedArrival;
+        // Preferiamo l'arrivo reale (actualArrival) allo Sched./Estimated Arrival per stabilire
+        // la categoria/cutoff di competenza: usare solo l'orario schedulato puo' produrre cutoff
+        // gia' passati (es. codici con cutoff nelle prime ore del mattino il cui Sched. Arrival
+        // era gia' nelle prime ore dello stesso giorno).
+        const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
         if (!arrivoIso) return null;
         const arrivo = new Date(arrivoIso);
         if (isNaN(arrivo.getTime())) return null;
-        const risultato = calcolaCutoffPerCodice(mov.origin, arrivo);
+        // Orario di arrivo REALE alla porta (quando il camion e' stato fisicamente agganciato
+        // alla baia): e' il riferimento usato per la regola dei 150 minuti di lavorazione.
+        let arrivoPortaReale = null;
+        if (voce.orario) {
+            const d = new Date(voce.orario);
+            if (!isNaN(d.getTime())) arrivoPortaReale = d;
+        }
+        const risultato = calcolaCutoffPerCodice(mov.origin, arrivo, arrivoPortaReale);
         if (!risultato) return null;
         return { cutoff: risultato, codice: mov.origin };
     }
@@ -161,7 +172,45 @@
         return "Freight";
     }
 
-    function calcolaCutoffPerCodice(codice, arrivo) {
+    // Costruisce, a partire da un elenco di categorie, la lista di tutti gli orari di cutoff
+    // distinti definiti nel sistema (indipendentemente dai codici). Serve per trovare il
+    // "prossimo cutoff utile" quando un camion arriva troppo tardi per quello naturalmente
+    // assegnato al proprio codice.
+    function elencoSlotCutoffUnici() {
+        const visti = new Set();
+        const slot = [];
+        CATEGORIE.forEach((c) => {
+            const chiave = c.cutoffOre + ":" + c.cutoffMin;
+            if (!visti.has(chiave)) {
+                visti.add(chiave);
+                slot.push({ ore: c.cutoffOre, min: c.cutoffMin });
+            }
+        });
+        return slot;
+    }
+    const SLOT_CUTOFF_UNICI = elencoSlotCutoffUnici();
+
+    // Trova il primo cutoff (tra TUTTI quelli definiti nel sistema, non solo quelli del codice)
+    // successivo a "cutoffBase" che garantisce almeno 150 minuti di margine rispetto
+    // all'orario di arrivo reale alla baia. Restituisce null se non ne trova uno entro 2 giorni
+    // (caso limite che non dovrebbe verificarsi in pratica).
+    function trovaProssimoCutoffConMargine(cutoffBase, arrivoPortaReale) {
+        const candidati = [];
+        for (let offset = 0; offset <= 2; offset++) {
+            SLOT_CUTOFF_UNICI.forEach((slot) => {
+                const d = new Date(cutoffBase.getFullYear(), cutoffBase.getMonth(), cutoffBase.getDate() + offset, slot.ore, slot.min, 0, 0);
+                if (d.getTime() > cutoffBase.getTime()) candidati.push(d);
+            });
+        }
+        candidati.sort((a, b) => a.getTime() - b.getTime());
+        for (const d of candidati) {
+            const margine = (d.getTime() - arrivoPortaReale.getTime()) / 60000;
+            if (margine >= 150) return d;
+        }
+        return candidati.length > 0 ? candidati[candidati.length - 1] : null;
+    }
+
+    function calcolaCutoffPerCodice(codice, arrivo, arrivoPortaReale) {
         const candidati = CATEGORIE.filter((c) => c.codici.includes(codice));
         if (candidati.length === 0) return null;
         // Per ogni categoria che comprende questo codice, prendiamo SOLO la prima
@@ -180,19 +229,39 @@
         });
         if (choices.length === 0) return null;
         choices.sort((a, b) => a.cutoffDate.getTime() - b.cutoffDate.getTime());
-        // Il margine minimo di 150 minuti ha senso solo quando esistono davvero PIU'
-        // categorie/turni alternativi tra cui scegliere (es. un cutoff delle 23:45 con
-        // ripiego alle 04:00). Se il codice appartiene a una sola categoria non c'e'
-        // nessun turno di ripiego: va sempre restituito il primo cutoff futuro valido.
+        // Il margine minimo di 150 minuti tra categorie diverse ha senso solo quando esistono
+        // davvero PIU' categorie/turni alternativi tra cui scegliere (es. un cutoff delle 23:45
+        // con ripiego alle 04:00). Se il codice appartiene a una sola categoria non c'e' nessun
+        // turno di ripiego a questo livello: va restituito il primo cutoff futuro valido (la
+        // regola dei 150 minuti sull'arrivo REALE alla baia, sotto, si occupera' comunque di
+        // slittare il cutoff se necessario).
+        let risultato = null;
         if (choices.length > 1) {
             for (let i = 0; i < choices.length; i++) {
                 const diffMinutiArrivoCutoff = (choices[i].cutoffDate.getTime() - arrivo.getTime()) / 60000;
-                if (diffMinutiArrivoCutoff >= 150) {
-                    return choices[i];
+                if (diffMinutiArrivoCutoff >= 150) { risultato = choices[i]; break; }
+            }
+            if (!risultato) risultato = choices[0];
+        } else {
+            risultato = choices[0];
+        }
+
+        // Regola dei 150 minuti di lavorazione sull'arrivo REALE alla baia: se il camion e'
+        // gia' fisicamente arrivato alla porta e tra quell'orario e il cutoff assegnato non ci
+        // sono almeno 150 minuti (oppure il cutoff assegnato e' gia' passato), il camion slitta
+        // al primo cutoff successivo - tra TUTTI quelli del sistema - che garantisce il margine.
+        // Questo copre anche i casi di cutoff "gia' passati" calcolati sullo Sched. Arrival per i
+        // codici con cutoff nelle prime ore del mattino.
+        if (arrivoPortaReale && !isNaN(arrivoPortaReale.getTime())) {
+            const margineReale = (risultato.cutoffDate.getTime() - arrivoPortaReale.getTime()) / 60000;
+            if (margineReale < 150) {
+                const nuovoCutoff = trovaProssimoCutoffConMargine(risultato.cutoffDate, arrivoPortaReale);
+                if (nuovoCutoff) {
+                    risultato = { cat: risultato.cat, cutoffDate: nuovoCutoff, cutoffOriginale: risultato.cutoffDate, ritardo: true };
                 }
             }
         }
-        return choices[0];
+        return risultato;
     }
 
     const stileBlink = document.createElement("style");
@@ -295,20 +364,44 @@
                 }
                 const origineEl = trovaValorePerChiave(sezione, "Origin");
                 const arrivoEl = trovaValorePerChiave(sezione, "Sched. Arrival");
+                const actualArrivoEl = trovaValorePerChiave(sezione, "Actual Arrival");
                 let risultato = null;
                 let codiceOrigine = null;
                 let testoArrivo = "";
+                let testoActualArrivo = "";
+                let testoArrivoPorta = "";
                 if (origineEl && arrivoEl) {
                     codiceOrigine = estraiCodiceGrezzo(origineEl);
                     testoArrivo = arrivoEl.textContent.trim();
                     if (codiceOrigine && !testoArrivo.toUpperCase().includes("N/A")) {
-                        const arrivo = parseDataOraSlash(testoArrivo);
-                        if (arrivo) risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo);
+                        // Preferiamo l'Actual Arrival allo Sched. Arrival per stabilire la
+                        // categoria/cutoff di competenza (evita cutoff gia' passati per i
+                        // codici con cutoff nelle prime ore del mattino).
+                        let arrivo = parseDataOraSlash(testoArrivo);
+                        if (actualArrivoEl) {
+                            testoActualArrivo = actualArrivoEl.textContent.trim();
+                            if (testoActualArrivo && !testoActualArrivo.toUpperCase().includes("N/A")) {
+                                const arrivoReale = parseDataOraSlash(testoActualArrivo);
+                                if (arrivoReale) arrivo = arrivoReale;
+                            }
+                        }
+                        // Orario di arrivo REALE alla porta (baia), usato per la regola dei
+                        // 150 minuti di lavorazione.
+                        let arrivoPortaReale = null;
+                        if (baiaSelezionata) {
+                            const arriviSalvati = caricaArriviBaia();
+                            const voceBaia = arriviSalvati[baiaSelezionata];
+                            if (voceBaia && voceBaia.orario) {
+                                const d = new Date(voceBaia.orario);
+                                if (!isNaN(d.getTime())) { arrivoPortaReale = d; testoArrivoPorta = voceBaia.orario; }
+                            }
+                        }
+                        if (arrivo) risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo, arrivoPortaReale);
                     }
                 }
                 aggiornaRigaArrivoECountdown(contenitore, risultato);
                 if (!origineEl || !arrivoEl) return;
-                const chiave = codiceOrigine + "|" + testoArrivo;
+                const chiave = codiceOrigine + "|" + testoArrivo + "|" + testoActualArrivo + "|" + testoArrivoPorta;
                 if (sezione.getAttribute("data-tnt-turno-key") === chiave) return;
                 sezione.setAttribute("data-tnt-turno-key", chiave);
                 const vecchia = sezione.querySelector(".tnt-turno-row");
@@ -321,7 +414,18 @@
                     riga.appendChild(creaColTurno("Tipo Cutoff", risultato.cat.nome));
                     const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
                     const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
-                    riga.appendChild(creaColTurno("Orario Cutoff", hh + ":" + mm));
+                    let testoCutoff = hh + ":" + mm;
+                    if (risultato.ritardo && risultato.cutoffOriginale) {
+                        const hhO = String(risultato.cutoffOriginale.getHours()).padStart(2, "0");
+                        const mmO = String(risultato.cutoffOriginale.getMinutes()).padStart(2, "0");
+                        testoCutoff = "* " + hhO + ":" + mmO + " -> " + hh + ":" + mm + " per late arrival";
+                    }
+                    const colCutoff = creaColTurno("Orario Cutoff", testoCutoff, risultato.ritardo ? "col-4" : "col-4");
+                    if (risultato.ritardo) {
+                        const valEl = colCutoff.querySelector(".door-info__movmt-value");
+                        if (valEl) { valEl.style.color = "#ff3b30"; valEl.title = "Cutoff slittato: meno di 150 minuti di lavorazione tra l'arrivo reale alla baia e il cutoff originale"; }
+                    }
+                    riga.appendChild(colCutoff);
                 } else {
                     riga.appendChild(creaColTurno("Turno", "N/A"));
                     riga.appendChild(creaColTurno("Tipo Cutoff", "N/A"));
@@ -422,6 +526,8 @@
         let cutoffOrario = "N/A";
         let cutoffTurno = "N/A";
         let cutoffTipo = "N/A";
+        let ritardoFlag = "No";
+        let cutoffOriginaleTesto = "";
 
         if (unitId) {
             const mov = cacheMovimentiPerUnit.get(String(unitId));
@@ -431,14 +537,19 @@
                 viaggio = mov.movementName || "N/A";
                 if (mov.tripTourDescription) viaggio += " (" + mov.tripTourDescription + ")";
 
-                const arrivoIso = mov.scheduleArrival || mov.estimatedArrival;
+                const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
                 if (arrivoIso) {
                     const arrivoDate = new Date(arrivoIso);
-                    const res = calcolaCutoffPerCodice(codiceOrigine, arrivoDate);
+                    const arrivoPortaReale = new Date(orarioIso);
+                    const res = calcolaCutoffPerCodice(codiceOrigine, arrivoDate, !isNaN(arrivoPortaReale.getTime()) ? arrivoPortaReale : null);
                     if (res) {
                         cutoffOrario = String(res.cutoffDate.getHours()).padStart(2, "0") + ":" + String(res.cutoffDate.getMinutes()).padStart(2, "0");
                         cutoffTurno = res.cat.turno;
                         cutoffTipo = res.cat.nome;
+                        if (res.ritardo && res.cutoffOriginale) {
+                            ritardoFlag = "Si";
+                            cutoffOriginaleTesto = String(res.cutoffOriginale.getHours()).padStart(2, "0") + ":" + String(res.cutoffOriginale.getMinutes()).padStart(2, "0");
+                        }
                     }
                 }
             }
@@ -454,7 +565,9 @@
             viaggio,
             cutoffOrario,
             cutoffTurno,
-            cutoffTipo
+            cutoffTipo,
+            ritardoFlag,
+            cutoffOriginaleTesto
         });
         salvaStoricoReport(storico);
     }
@@ -467,10 +580,10 @@
         }
 
         let csvContent = "data:text/csv;charset=utf-8,";
-        csvContent += "Data;Baia;Unit ID;Ora Arrivo Reale;Codice;Localita;Info Viaggio;Ora Cutoff;Turno;Categoria Cutoff\n";
+        csvContent += "Data;Baia;Unit ID;Ora Arrivo Reale;Codice;Localita;Info Viaggio;Ora Cutoff;Turno;Categoria Cutoff;Slittato per Late Arrival;Cutoff Originale\n";
 
         storico.forEach(r => {
-            const riga = `${r.data};${r.doorNumber};${r.unitId};${r.orarioArrivo};${r.codiceOrigine};${r.localita};${r.viaggio};${r.cutoffOrario};${r.cutoffTurno};${r.cutoffTipo}`;
+            const riga = `${r.data};${r.doorNumber};${r.unitId};${r.orarioArrivo};${r.codiceOrigine};${r.localita};${r.viaggio};${r.cutoffOrario};${r.cutoffTurno};${r.cutoffTipo};${r.ritardoFlag || "No"};${r.cutoffOriginaleTesto || ""}`;
             csvContent += riga + "\n";
         });
 
@@ -590,9 +703,26 @@
             if (!arrivoEl || !codiceOrigine) continue;
             const testoArrivo = arrivoEl.textContent.trim();
             if (testoArrivo.toUpperCase().includes("N/A")) continue;
-            const arrivo = parseDataOraSlash(testoArrivo);
+            let arrivo = parseDataOraSlash(testoArrivo);
             if (!arrivo) continue;
-            const cutoffRes = calcolaCutoffPerCodice(codiceOrigine, arrivo);
+            const actualArrivoEl = trovaValorePerChiave(sezione, "Actual Arrival");
+            if (actualArrivoEl) {
+                const testoActual = actualArrivoEl.textContent.trim();
+                if (testoActual && !testoActual.toUpperCase().includes("N/A")) {
+                    const arrivoReale = parseDataOraSlash(testoActual);
+                    if (arrivoReale) arrivo = arrivoReale;
+                }
+            }
+            let arrivoPortaReale = null;
+            if (baiaSelezionata) {
+                const arriviSalvati = caricaArriviBaia();
+                const voceBaia = arriviSalvati[baiaSelezionata];
+                if (voceBaia && voceBaia.orario) {
+                    const d = new Date(voceBaia.orario);
+                    if (!isNaN(d.getTime())) arrivoPortaReale = d;
+                }
+            }
+            const cutoffRes = calcolaCutoffPerCodice(codiceOrigine, arrivo, arrivoPortaReale);
             if (cutoffRes) return { cutoff: cutoffRes, codice: codiceOrigine };
         }
         return null;
@@ -609,9 +739,14 @@
             // visibile nel pannello (utile per capire quanto e' in ritardo). Scartiamo solo
             // i cutoff troppo lontani nel futuro (oltre la soglia impostata).
             if (diffMinuti > SOGLIA_SCARICO_MINUTI) return;
-            const chiave = risultato.cat.nome;
-            if (!gruppi.has(chiave)) gruppi.set(chiave, { turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
-            gruppi.get(chiave).baie.push(infoBaia);
+            const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
+            const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
+            // La chiave include l'orario effettivo (non solo il nome categoria): un camion
+            // slittato per la regola dei 150 minuti finisce quindi in una riga separata con il
+            // proprio orario reale, invece di essere mescolato nel gruppo del cutoff originale.
+            const chiave = risultato.cat.nome + "|" + hh + ":" + mm;
+            if (!gruppi.has(chiave)) gruppi.set(chiave, { nome: risultato.cat.nome, turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
+            gruppi.get(chiave).baie.push(risultato.ritardo ? infoBaia + "*" : infoBaia);
         }
         // Vista SCHEDULED: camion non ancora partiti dall'origine (nessuna baia assegnata).
         // Struttura DOM: <div class="schedule_units"> ... <div class="scheduled-orgin">CODICE</div>
@@ -650,10 +785,20 @@
             if (!codiceOrigine || testoArrivo.toUpperCase().includes("N/A")) return;
             const arrivo = parseDataOraSlash(testoArrivo);
             if (!arrivo) return;
-            const risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo);
-            if (!risultato) return;
             const doorEl = el.querySelector(".door_number, .west_door_number, .east_door_number, .reverse_door_number");
-            aggiungiAlGruppo(risultato, doorEl ? doorEl.textContent.trim() : "(" + codiceOrigine + ")");
+            const doorNumberTesto = doorEl ? doorEl.textContent.trim() : null;
+            let arrivoPortaReale = null;
+            if (doorNumberTesto) {
+                const arriviSalvati = caricaArriviBaia();
+                const voceBaia = arriviSalvati[doorNumberTesto];
+                if (voceBaia && voceBaia.orario) {
+                    const d = new Date(voceBaia.orario);
+                    if (!isNaN(d.getTime())) arrivoPortaReale = d;
+                }
+            }
+            const risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo, arrivoPortaReale);
+            if (!risultato) return;
+            aggiungiAlGruppo(risultato, doorNumberTesto || "(" + codiceOrigine + ")");
         });
         const baie = trovaBaieScaricoOccupate();
         if (baie.length > 0) trovatoQualcosa = true;
@@ -680,19 +825,24 @@
         }
         const voci = [...gruppi.entries()].sort((a, b) => a[1].orario.getTime() - b[1].orario.getTime());
         let html = headerHtml;
-        voci.forEach(([nome, info]) => {
+        let presenteAsterisco = false;
+        voci.forEach(([chiave, info]) => {
             const hh = String(info.orario.getHours()).padStart(2, "0");
             const mm = String(info.orario.getMinutes()).padStart(2, "0");
             const listaBaie = info.baie.filter(Boolean).join(", ");
+            if (listaBaie.indexOf("*") !== -1) presenteAsterisco = true;
             html += '<div style="padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.1);font-family:Roboto,sans-serif;">'
                 + '<div style="display:flex;align-items:center;">'
                 + '<span class="tnt-dot-giallo"></span>'
-                + '<span style="flex:1;color:#FF7A00;font-weight:bold;">' + nome + ' (' + info.baie.length + ')</span>'
+                + '<span style="flex:1;color:#FF7A00;font-weight:bold;">' + info.nome + ' (' + info.baie.length + ')</span>'
                 + '<span style="font-size:12px;color:#FF7A00;font-weight:bold;">' + hh + ':' + mm + '</span>'
                 + '</div>'
                 + '<div style="font-size:11px;color:#FF7A00;opacity:0.7;margin-left:17px;">Baie: ' + listaBaie + '</div>'
                 + '</div>';
         });
+        if (presenteAsterisco) {
+            html += '<div style="padding:6px 8px;font-size:10px;color:#ff3b30;font-family:Roboto,sans-serif;">* slittato al cutoff successivo per late arrival (meno di 150min di lavorazione disponibili)</div>';
+        }
         panel.innerHTML = html;
     }
 
