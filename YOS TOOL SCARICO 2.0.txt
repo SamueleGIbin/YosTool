@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.4
-// @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report Turno CSV (fix: cutoff/countdown errati per codici con una sola categoria; rimossa duplicazione dello script; lettura anche della vista Scheduled per il pannello scarico)
+// @version      2.5
+// @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report Turno CSV (fix: cutoff/countdown errati per codici con una sola categoria; rimossa duplicazione dello script; lettura anche della vista Scheduled per il pannello scarico; camion senza baia mostrano il codice origine; le voci scadute restano visibili nel pannello scarico; wording "In ritardo di" al posto di "Scaduto da")
 // @author       Samuele Gibin
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -546,7 +546,7 @@
                 const diffMinsTot = Math.floor(Math.abs(diffMs) / 60000);
                 const ore = Math.floor(diffMinsTot / 60);
                 const minuti = diffMinsTot % 60;
-                valoreCountdown = `Scaduto da ${ore > 0 ? ore + 'h ' : ''}${minuti}m`;
+                valoreCountdown = `In ritardo di ${ore > 0 ? ore + 'h ' : ''}${minuti}m`;
             }
         }
         const rigaNuova = document.createElement("div");
@@ -605,7 +605,10 @@
         let trovatoQualcosa = false;
         function aggiungiAlGruppo(risultato, infoBaia) {
             const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
-            if (diffMinuti > SOGLIA_SCARICO_MINUTI || diffMinuti <= -30) return;
+            // Non scartiamo piu' le voci scadute: finche' il cutoff esiste, il camion resta
+            // visibile nel pannello (utile per capire quanto e' in ritardo). Scartiamo solo
+            // i cutoff troppo lontani nel futuro (oltre la soglia impostata).
+            if (diffMinuti > SOGLIA_SCARICO_MINUTI) return;
             const chiave = risultato.cat.nome;
             if (!gruppi.has(chiave)) gruppi.set(chiave, { turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
             gruppi.get(chiave).baie.push(infoBaia);
