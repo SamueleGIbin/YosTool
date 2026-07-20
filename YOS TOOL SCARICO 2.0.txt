@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.5
+// @version      2.6
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report Turno CSV
 // @author       Samuele Gibin
 // @match        https://yos.apps.tnt.com/hub-overview*
@@ -487,7 +487,7 @@
     function aggiornaPannelloOrologio() {
         const panel = document.getElementById("tnt-orologio-panel");
         if (!panel || panel.style.display === "none") return;
-        const headerHtml = '<div style="background:#FF7A00;color:#ffffff;padding:8px 10px;font-weight:bold;font-family:Roboto,sans-serif;border-top-left-radius:8px;border-top-right-radius:8px;display:flex;"><span style="color:white !important;">Scadenze Cutoff Scarico (INBOUND)</span><span id="tnt-close-panel" style="cursor:pointer;font-size:16px;margin-left:auto;">&times;</span></div>';
+        const headerHtml = '<div style="background:#2c2d2f;color:#FF7A00;padding:8px 10px;font-weight:bold;font-family:Roboto,sans-serif;border-top-left-radius:8px;border-top-right-radius:8px;display:flex;border-bottom:2px solid #FF7A00;"><span>Scadenze Cutoff Scarico (INBOUND)</span><span id="tnt-close-panel" style="cursor:pointer;font-size:16px;margin-left:auto;color:#FF7A00;">&times;</span></div>';
         
         const risultati = leggiInboundInScadenza();
         if (risultati.length === 0) {
@@ -506,7 +506,7 @@
             const hh = String(g.orario.getHours()).padStart(2, "0"), mm = String(g.orario.getMinutes()).padStart(2, "0");
             html += `<div style="background:rgba(255,122,0,0.1);padding:4px 8px;font-weight:bold;font-size:12px;font-family:Roboto,sans-serif;color:#FF7A00;border-bottom:1px solid rgba(255,122,0,0.2);display:flex;"><span>${nome.toUpperCase()}</span><span style="margin-left:auto;">${hh}:${mm}</span></div>`;
             g.items.forEach((item) => {
-                const minTesto = item.diffMinuti > 0 ? Math.floor(item.diffMinuti) + " min" : "Scaduto";
+                const minTesto = item.diffMinuka > 0 ? Math.floor(item.diffMinuti) + " min" : "Scaduto";
                 const clDot = item.diffMinuti <= 30 ? "tnt-dot-rosso" : "tnt-dot-giallo";
                 html += `<div style="display:flex;align-items:center;padding:5px 8px;border-bottom:1px solid rgba(255,255,255,0.05);font-family:Roboto,sans-serif;">
                            <span class="${clDot}"></span>
@@ -522,7 +522,7 @@
     function aggiornaPannelloOutbound() {
         const panel = document.getElementById("tnt-orologio-panel");
         if (!panel || panel.style.display === "none") return;
-        const headerHtml = '<div style="background:#ffffff;color:#2c2d2f;padding:8px 10px;font-weight:bold;font-family:Roboto,sans-serif;border-top-left-radius:8px;border-top-right-radius:8px;display:flex;border-bottom:2px solid #FF7A00;"><span style="color:#2c2d2f !important;">Scadenze Partenze Carico (OUTBOUND)</span><span id="tnt-close-panel" style="cursor:pointer;font-size:16px;margin-left:auto;">&times;</span></div>';
+        const headerHtml = '<div style="background:#2c2d2f;color:#ffffff;padding:8px 10px;font-weight:bold;font-family:Roboto,sans-serif;border-top-left-radius:8px;border-top-right-radius:8px;display:flex;border-bottom:2px solid #ffffff;"><span>Scadenze Partenze Carico (OUTBOUND)</span><span id="tnt-close-panel" style="cursor:pointer;font-size:16px;margin-left:auto;color:#ffffff;">&times;</span></div>';
         
         const risultati = leggiOutboundInScadenza();
         const ordineCategorie = ["Carico", "Parcheggio", "Freight"];
