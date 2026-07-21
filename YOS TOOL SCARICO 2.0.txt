@@ -1,9 +1,8 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.6
-// @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report Turno CSV (fix: cutoff/countdown errati per codici con una sola categoria; rimossa duplicazione dello script; lettura anche della vista Scheduled per il pannello scarico; camion senza baia mostrano il codice origine; le voci scadute restano visibili nel pannello scarico; wording "In ritardo di" al posto di "Scaduto da"; NEW: il cutoff viene ora calcolato usando l'arrivo reale (Actual Arrival / arrivo reale alla baia) invece del solo Sched. Arrival, evitando cutoff "fantasma" gia' passati per i codici con cutoff nelle prime ore del mattino; NEW: regola dei 150 minuti di lavorazione - se tra l'arrivo reale alla baia e il cutoff assegnato mancano meno di 150 minuti, il camion slitta automaticamente al primo cutoff successivo (tra tutti quelli definiti) che garantisce almeno 150 minuti, marcato con asterisco e indicazione "cutoff originale -> nuovo cutoff per late arrival")
-// @author       Samuele Gibin
+// @version      2.7
+// @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
@@ -511,7 +510,27 @@
         try { localStorage.setItem(STORAGE_KEY_STORICO, JSON.stringify(dati)); } catch (e) {}
     }
 
+    const GIORNI_CONSERVAZIONE_STORICO = 3;
+
+    // Rimuove dallo storico i record piu' vecchi di GIORNI_CONSERVAZIONE_STORICO giorni.
+    // Viene eseguita ad ogni apertura della pagina e ad ogni nuova registrazione: la pulizia
+    // avviene quindi solo quando lo script e' effettivamente in esecuzione (pagina aperta nel
+    // browser). Se il PC resta spento/la pagina resta chiusa per piu' di 3 giorni, i dati NON
+    // vengono cancellati "in background": restano salvati e verranno ripuliti alla prima
+    // riapertura successiva della pagina YOS.
+    function pulisciStoricoVecchio() {
+        const storico = caricaStoricoReport();
+        if (storico.length === 0) return;
+        const limite = Date.now() - GIORNI_CONSERVAZIONE_STORICO * 24 * 60 * 60 * 1000;
+        const filtrato = storico.filter((r) => {
+            const t = r.timestampIso ? new Date(r.timestampIso).getTime() : NaN;
+            return !isNaN(t) && t >= limite;
+        });
+        if (filtrato.length !== storico.length) salvaStoricoReport(filtrato);
+    }
+
     function registraInStoricoReport(doorNumber, unitId, orarioIso) {
+        pulisciStoricoVecchio();
         const storico = caricaStoricoReport();
         const esisteGia = storico.some(item => item.doorNumber === doorNumber && item.unitId === unitId);
         if (esisteGia) return;
@@ -557,6 +576,7 @@
 
         storico.push({
             data: dataFormattata,
+            timestampIso: orarioIso,
             doorNumber,
             unitId: unitId || "N/A",
             orarioArrivo: orarioFormattato,
@@ -572,10 +592,32 @@
         salvaStoricoReport(storico);
     }
 
-    function scaricaReportCSV() {
-        const storico = caricaStoricoReport();
+    // dataInizioStr / dataFineStr: stringhe "YYYY-MM-DD" (formato input type="date"), opzionali.
+    // Se entrambe assenti, esporta l'intero storico salvato (comportamento precedente).
+    function scaricaReportCSV(dataInizioStr, dataFineStr) {
+        let storico = caricaStoricoReport();
         if (storico.length === 0) {
-            alert("Nessun dato registrato in questo turno per il report.");
+            alert("Nessun dato registrato per il report.");
+            return;
+        }
+
+        if (dataInizioStr || dataFineStr) {
+            const inizio = dataInizioStr ? new Date(dataInizioStr + "T00:00:00") : null;
+            const fine = dataFineStr ? new Date(dataFineStr + "T23:59:59") : null;
+            storico = storico.filter((r) => {
+                // I record salvati con versioni precedenti dello script potrebbero non avere
+                // il timestamp completo: li includiamo comunque per non perdere dati vecchi.
+                if (!r.timestampIso) return true;
+                const d = new Date(r.timestampIso);
+                if (isNaN(d.getTime())) return true;
+                if (inizio && d < inizio) return false;
+                if (fine && d > fine) return false;
+                return true;
+            });
+        }
+
+        if (storico.length === 0) {
+            alert("Nessun dato registrato nel periodo selezionato.");
             return;
         }
 
@@ -590,10 +632,38 @@
         const encodedUri = encodeURI(csvContent);
         const link = document.createElement("a");
         link.setAttribute("href", encodedUri);
-        link.setAttribute("download", `REPORT_TURNO_YOS_${new Date().toISOString().slice(0,10)}.csv`);
+        const suffisso = (dataInizioStr || dataFineStr)
+            ? `_${dataInizioStr || "inizio"}_a_${dataFineStr || "fine"}`
+            : `_TUTTO_${new Date().toISOString().slice(0,10)}`;
+        link.setAttribute("download", `REPORT_TURNO_YOS${suffisso}.csv`);
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+    }
+
+    function renderPannelloReport(panel) {
+        const oggi = new Date().toISOString().slice(0, 10);
+        panel.innerHTML =
+            '<div style="padding:8px;font-family:Roboto,sans-serif;">' +
+                '<div style="font-weight:bold;margin-bottom:8px;color:#FF7A00;">Esporta Report CSV</div>' +
+                '<label style="display:block;font-size:12px;margin-bottom:2px;opacity:0.8;">Dal giorno:</label>' +
+                '<input type="date" id="tnt-report-data-inizio" value="' + oggi + '" style="width:100%;margin-bottom:8px;padding:4px;border-radius:4px;border:none;box-sizing:border-box;">' +
+                '<label style="display:block;font-size:12px;margin-bottom:2px;opacity:0.8;">Al giorno:</label>' +
+                '<input type="date" id="tnt-report-data-fine" value="' + oggi + '" style="width:100%;margin-bottom:10px;padding:4px;border-radius:4px;border:none;box-sizing:border-box;">' +
+                '<button id="tnt-report-btn-scarica" style="width:100%;padding:6px;background:#FF7A00;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:bold;margin-bottom:6px;">Scarica CSV periodo</button>' +
+                '<button id="tnt-report-btn-tutto" style="width:100%;padding:6px;background:#47484a;color:#fff;border:1px solid #666;border-radius:4px;cursor:pointer;">Scarica tutto lo storico</button>' +
+            '</div>';
+
+        document.getElementById("tnt-report-btn-scarica").addEventListener("click", (e) => {
+            e.stopPropagation();
+            const dataInizio = document.getElementById("tnt-report-data-inizio").value;
+            const dataFine = document.getElementById("tnt-report-data-fine").value;
+            scaricaReportCSV(dataInizio || null, dataFine || null);
+        });
+        document.getElementById("tnt-report-btn-tutto").addEventListener("click", (e) => {
+            e.stopPropagation();
+            scaricaReportCSV(null, null);
+        });
     }
 
     function aggiornaTracciamentoArrivi() {
@@ -936,12 +1006,9 @@
             const disegnoReport = '<rect x="15" y="13" width="16" height="20" rx="2" fill="none" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="18" x2="27" y2="18" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="23" x2="27" y2="23" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="28" x2="24" y2="28" stroke="#FF7A00" stroke-width="2"/>';
             const btnReport = creaIconaMenu("tnt-btn-scarica-report", "#FF7A00", disegnoReport);
             btnReport.title = "Scarica Report Turno CSV";
-            
-            btnReport.addEventListener("click", (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                scaricaReportCSV();
-            });
+
+            const panelReport = creaPannello("tnt-report-panel");
+            collegaClick(btnReport, panelReport, () => renderPannelloReport(panelReport), 0);
             menu.appendChild(btnReport);
         }
     }
@@ -958,6 +1025,7 @@
     }, true);
 
     try { scanBlocchi(document.body); } catch (e) {}
+    try { pulisciStoricoVecchio(); } catch (e) {}
     try { initIcone(); } catch (e) {}
     try { aggiornaTracciamentoArrivi(); } catch (e) {}
     try { processaTripDetails(); } catch (e) {}
@@ -991,4 +1059,5 @@
 
     setInterval(aggiornaTracciamentoArrivi, 5000);
     setInterval(aggiornaPannelloOutbound, 15000);
+    setInterval(pulisciStoricoVecchio, 60 * 60 * 1000);
 })();
