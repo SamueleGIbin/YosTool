@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.7
+// @version      2.8
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -152,12 +152,12 @@
         { nome: "Filiali per Export", turno: "Secondo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["VBS", "MM1", "VE1", "IBD", "REM", "BO1", "QPA", "VRN", "MDA", "PMF", "IIM"] },
         { nome: "Clienti International", turno: "Primo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["LIVA", "GEWI", "MASE", "APLE", "UFAL", "GDEC"] },
         { nome: "Filiali Divisione per 07", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["BRG", "IPO", "MZ1", "IBU", "TO1", "MM1", "VRN", "VNZ", "TV1", "VE1"] },
-        { nome: "Import Secunda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH", "KCW"] },
+        { nome: "Import Seconda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH", "KCW"] },
         { nome: "Hub 07 Nord", turno: "Secondo Shift", cutoffOre: 5, cutoffMin: 30, codici: ["BO2", "PD2", "FC5", "PSA", "ZRO"] },
         { nome: "Hub Export/Sud", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["AN6", "FIA", "NC3", "NT3", "GDEC", "COFR", "UFAL", "APLE"] },
         { nome: "Import Anticipi", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["LYS", "MRS", "NT3", "BA5"] }
     ];
-    const SOGLIA_OUTBOUND_MINUTI = 300;
+    const SOGLIA_OUTBOUND_MINUTI = 60;
     const SOGLIA_SCARICO_MINUTI = 300;
 
     function categoriaBaia(door) {
