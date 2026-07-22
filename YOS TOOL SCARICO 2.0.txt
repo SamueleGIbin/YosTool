@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.8
+// @version      2.7
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -152,12 +152,12 @@
         { nome: "Filiali per Export", turno: "Secondo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["VBS", "MM1", "VE1", "IBD", "REM", "BO1", "QPA", "VRN", "MDA", "PMF", "IIM"] },
         { nome: "Clienti International", turno: "Primo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["LIVA", "GEWI", "MASE", "APLE", "UFAL", "GDEC"] },
         { nome: "Filiali Divisione per 07", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["BRG", "IPO", "MZ1", "IBU", "TO1", "MM1", "VRN", "VNZ", "TV1", "VE1"] },
-        { nome: "Import Seconda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH", "KCW"] },
+        { nome: "Import Secunda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH", "KCW"] },
         { nome: "Hub 07 Nord", turno: "Secondo Shift", cutoffOre: 5, cutoffMin: 30, codici: ["BO2", "PD2", "FC5", "PSA", "ZRO"] },
         { nome: "Hub Export/Sud", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["AN6", "FIA", "NC3", "NT3", "GDEC", "COFR", "UFAL", "APLE"] },
         { nome: "Import Anticipi", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["LYS", "MRS", "NT3", "BA5"] }
     ];
-    const SOGLIA_OUTBOUND_MINUTI = 60;
+    const SOGLIA_OUTBOUND_MINUTI = 300;
     const SOGLIA_SCARICO_MINUTI = 300;
 
     function categoriaBaia(door) {
@@ -264,7 +264,37 @@
     }
 
     const stileBlink = document.createElement("style");
-    stileBlink.textContent = "@keyframes tntBlinkRosso{0%,100%{opacity:1;}50%{opacity:0.15;}}.tnt-dot-rosso{display:inline-block;width:9px;height:9px;border-radius:50%;background:#ff3b30;margin-right:8px;animation:tntBlinkRosso 1s infinite;}.tnt-dot-giallo{display:inline-block;width:9px;height:9px;border-radius:50%;background:#ffcc00;margin-right:8px;animation:tntBlinkRosso 1.4s infinite;}";
+    stileBlink.textContent = [
+        "@keyframes tntBlinkRosso{0%,100%{opacity:1;}50%{opacity:0.15;}}",
+        ".tnt-dot-rosso{display:inline-block;width:9px;height:9px;border-radius:50%;background:#E24B4A;margin-right:8px;animation:tntBlinkRosso 1s infinite;flex-shrink:0;}",
+        ".tnt-dot-giallo{display:inline-block;width:9px;height:9px;border-radius:50%;background:#FAC775;margin-right:8px;animation:tntBlinkRosso 1.4s infinite;flex-shrink:0;}",
+        ".tnt-panel{position:fixed;display:none;flex-direction:column;background:#1c1c1e;border-left:1px solid #333;box-shadow:-6px 0 18px rgba(0,0,0,0.45);z-index:99999;font-family:Roboto,sans-serif;color:#f2f2f2;}",
+        ".tnt-panel-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #2c2c2e;flex:0 0 auto;}",
+        ".tnt-panel-title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;color:#f2f2f2;}",
+        ".tnt-panel-close{cursor:pointer;color:#8a8a8e;font-size:18px;line-height:1;padding:2px 6px;border-radius:4px;}",
+        ".tnt-panel-close:hover{background:#2c2c2e;color:#f2f2f2;}",
+        ".tnt-panel-body{flex:1 1 auto;overflow-y:auto;padding:10px;}",
+        ".tnt-group-label{color:#8a8a8e;font-size:11px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;padding:10px 6px 6px;}",
+        ".tnt-group-label:first-child{padding-top:2px;}",
+        ".tnt-card{background:#242426;border-left:3px solid #555;border-radius:0 8px 8px 0;padding:9px 12px;margin-bottom:6px;}",
+        ".tnt-card-row{display:flex;align-items:center;justify-content:space-between;gap:8px;}",
+        ".tnt-card-title{color:#f2f2f2;font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+        ".tnt-card-sub{color:#8a8a8e;font-size:11px;margin-top:4px;line-height:1.4;}",
+        ".tnt-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;flex-shrink:0;}",
+        ".tnt-card-rosso{border-left-color:#E24B4A;}",
+        ".tnt-card-rosso .tnt-badge{background:#501313;color:#F7C1C1;}",
+        ".tnt-card-ambra{border-left-color:#FAC775;}",
+        ".tnt-card-ambra .tnt-badge{background:#412402;color:#FAC775;}",
+        ".tnt-card-verde{border-left-color:#5DCAA5;}",
+        ".tnt-card-verde .tnt-badge{background:#04342C;color:#9FE1CB;}",
+        ".tnt-empty{padding:16px 8px;opacity:0.6;font-family:Roboto,sans-serif;color:#c9c9cc;font-size:13px;text-align:center;}",
+        ".tnt-footnote{padding:10px 6px 4px;font-size:10px;color:#E24B4A;font-family:Roboto,sans-serif;}",
+        ".tnt-panel-body label{display:block;font-size:12px;margin-bottom:3px;color:#8a8a8e;}",
+        ".tnt-panel-body input[type=date]{width:100%;margin-bottom:12px;padding:7px 8px;border-radius:6px;border:1px solid #333;background:#242426;color:#f2f2f2;box-sizing:border-box;}",
+        ".tnt-panel-body button{width:100%;padding:9px;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;margin-bottom:8px;border:none;}",
+        ".tnt-btn-primary{background:#FF7A00;color:#1c1c1e;}",
+        ".tnt-btn-secondary{background:#2c2c2e;color:#f2f2f2;border:1px solid #444 !important;}"
+    ].join("");
     document.head.appendChild(stileBlink);
 
     const TARGET_SELECTOR = ".door-info__movmt-value, .inbound-origin-en-route, .inbound-origin";
@@ -435,6 +465,28 @@
         });
     }
 
+    // Colori con cui l'interfaccia YOS marca una unita' come "pronta" (docking indicator blu/verde-acqua).
+    const COLORI_UNIT_PRONTA = ["rgb(135,185,172)"];
+
+    // Determina se una riga di outbound e' gia' "pronta" (unit ready) e va quindi esclusa dal
+    // menu Carico. Controlliamo piu' segnali perche' il colore puo' arrivare da uno style
+    // inline (vecchio comportamento) oppure da una classe CSS applicata dinamicamente: in
+    // quel caso .style.backgroundColor resta vuoto e il vecchio controllo non lo intercettava,
+    // lasciando il camion visibile nel menu anche dopo che era gia' diventato blu.
+    function rigaSegnalataPronta(riga) {
+        if (riga.querySelector(".unit_ready_outline") || riga.classList.contains("unit_ready_outline")) return true;
+        const dockingBg = riga.querySelector('[id^="dockingBg_"]');
+        if (!dockingBg) return false;
+        if (dockingBg.className && typeof dockingBg.className === "string" && /ready/i.test(dockingBg.className)) return true;
+        let colore = dockingBg.style && dockingBg.style.backgroundColor ? dockingBg.style.backgroundColor : "";
+        if (!colore && window.getComputedStyle) {
+            try { colore = window.getComputedStyle(dockingBg).backgroundColor || ""; } catch (e) {}
+        }
+        colore = colore.replace(/\s+/g, "");
+        if (!colore) return false;
+        return COLORI_UNIT_PRONTA.some((c) => colore.indexOf(c) !== -1);
+    }
+
     function leggiOutboundInScadenza() {
         const righe = document.querySelectorAll(".scheduled-root.outbound-task, .scheduled-root.highlight-task, .scheduled-root.highlight-undeparted-unit");
         const risultati = [];
@@ -447,13 +499,7 @@
             const door = doorEl.textContent.trim();
             const testo = dataEl.textContent.trim();
             if (!testo || testo.toUpperCase().includes("N/A") || door === "-" || !door || categoriaBaia(door) === "Scarico") return;
-            const unitReady = riga.querySelector(".unit_ready_outline") || riga.classList.contains("unit_ready_outline");
-            const dockingBg = riga.querySelector('[id^="dockingBg_"]');
-            let isBlue = false;
-            if (dockingBg && dockingBg.style && dockingBg.style.backgroundColor) {
-                if (dockingBg.style.backgroundColor.replace(/\s+/g, "").indexOf("rgb(135,185,172)") !== -1) isBlue = true;
-            }
-            if (unitReady || isBlue) return;
+            if (rigaSegnalataPronta(riga)) return;
             const match = testo.match(/(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
             if (!match) return;
             const giorno = parseInt(match[1], 10), mese = parseInt(match[2], 10), ore = parseInt(match[3], 10), minuti = parseInt(match[4], 10);
@@ -641,18 +687,15 @@
         document.body.removeChild(link);
     }
 
-    function renderPannelloReport(panel) {
+    function renderPannelloReport(panelBody) {
         const oggi = new Date().toISOString().slice(0, 10);
-        panel.innerHTML =
-            '<div style="padding:8px;font-family:Roboto,sans-serif;">' +
-                '<div style="font-weight:bold;margin-bottom:8px;color:#FF7A00;">Esporta Report CSV</div>' +
-                '<label style="display:block;font-size:12px;margin-bottom:2px;opacity:0.8;">Dal giorno:</label>' +
-                '<input type="date" id="tnt-report-data-inizio" value="' + oggi + '" style="width:100%;margin-bottom:8px;padding:4px;border-radius:4px;border:none;box-sizing:border-box;">' +
-                '<label style="display:block;font-size:12px;margin-bottom:2px;opacity:0.8;">Al giorno:</label>' +
-                '<input type="date" id="tnt-report-data-fine" value="' + oggi + '" style="width:100%;margin-bottom:10px;padding:4px;border-radius:4px;border:none;box-sizing:border-box;">' +
-                '<button id="tnt-report-btn-scarica" style="width:100%;padding:6px;background:#FF7A00;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:bold;margin-bottom:6px;">Scarica CSV periodo</button>' +
-                '<button id="tnt-report-btn-tutto" style="width:100%;padding:6px;background:#47484a;color:#fff;border:1px solid #666;border-radius:4px;cursor:pointer;">Scarica tutto lo storico</button>' +
-            '</div>';
+        panelBody.innerHTML =
+            '<label>Dal giorno</label>' +
+            '<input type="date" id="tnt-report-data-inizio" value="' + oggi + '">' +
+            '<label>Al giorno</label>' +
+            '<input type="date" id="tnt-report-data-fine" value="' + oggi + '">' +
+            '<button id="tnt-report-btn-scarica" class="tnt-btn-primary">Scarica CSV periodo</button>' +
+            '<button id="tnt-report-btn-tutto" class="tnt-btn-secondary">Scarica tutto lo storico</button>';
 
         document.getElementById("tnt-report-btn-scarica").addEventListener("click", (e) => {
             e.stopPropagation();
@@ -798,8 +841,7 @@
         return null;
     }
 
-    function scansionaBaieScarico(panel) {
-        const headerHtml = '<div style="padding:6px 8px 3px;font-size:11px;font-weight:bold;text-transform:uppercase;opacity:0.6;letter-spacing:0.5px;font-family:Roboto,sans-serif;">SCARICO</div>';
+    function scansionaBaieScarico(panelBody) {
         const gruppi = new Map();
         const ora = new Date();
         let trovatoQualcosa = false;
@@ -882,43 +924,62 @@
             aggiungiAlGruppo(infoCutoff.cutoff, baia.doorNumber);
         }
         if (!trovatoQualcosa) {
-            panel.innerHTML = headerHtml + '<div style="padding:6px 8px;opacity:0.7;font-family:Roboto,sans-serif;color:#FF7A00;">Nessun camion/baia trovato</div>';
+            panelBody.innerHTML = '<div class="tnt-empty">Nessun camion/baia trovato</div>';
             return;
         }
-        renderPannelloScaricoConteggi(panel, gruppi, headerHtml);
+        renderPannelloScaricoConteggi(panelBody, gruppi);
     }
 
-    function renderPannelloScaricoConteggi(panel, gruppi, headerHtml) {
+    function renderPannelloScaricoConteggi(panelBody, gruppi) {
         if (gruppi.size === 0) {
-            panel.innerHTML = headerHtml + '<div style="padding:6px 8px;opacity:0.7;font-family:Roboto,sans-serif;color:#FF7A00;">Nessuno scarico in scadenza</div>';
+            panelBody.innerHTML = '<div class="tnt-empty">Nessuno scarico in scadenza</div>';
             return;
         }
+        const ora = new Date();
         const voci = [...gruppi.entries()].sort((a, b) => a[1].orario.getTime() - b[1].orario.getTime());
-        let html = headerHtml;
-        let presenteAsterisco = false;
+        const fasce = [
+            { chiave: "ritardo", etichetta: "In ritardo", classe: "tnt-card-rosso", test: (m) => m < 0 },
+            { chiave: "30", etichetta: "Entro 30 min", classe: "tnt-card-rosso", test: (m) => m <= 30 },
+            { chiave: "60", etichetta: "Entro 60 min", classe: "tnt-card-ambra", test: (m) => m <= 60 },
+            { chiave: "oltre", etichetta: "Successivi", classe: "tnt-card-ambra", test: () => true }
+        ];
+        const bucket = new Map();
         voci.forEach(([chiave, info]) => {
-            const hh = String(info.orario.getHours()).padStart(2, "0");
-            const mm = String(info.orario.getMinutes()).padStart(2, "0");
-            const listaBaie = info.baie.filter(Boolean).join(", ");
-            if (listaBaie.indexOf("*") !== -1) presenteAsterisco = true;
-            html += '<div style="padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.1);font-family:Roboto,sans-serif;">'
-                + '<div style="display:flex;align-items:center;">'
-                + '<span class="tnt-dot-giallo"></span>'
-                + '<span style="flex:1;color:#FF7A00;font-weight:bold;">' + info.nome + ' (' + info.baie.length + ')</span>'
-                + '<span style="font-size:12px;color:#FF7A00;font-weight:bold;">' + hh + ':' + mm + '</span>'
-                + '</div>'
-                + '<div style="font-size:11px;color:#FF7A00;opacity:0.7;margin-left:17px;">Baie: ' + listaBaie + '</div>'
-                + '</div>';
+            const diffMinuti = (info.orario.getTime() - ora.getTime()) / 60000;
+            const fascia = fasce.find((f) => f.test(diffMinuti));
+            if (!bucket.has(fascia.chiave)) bucket.set(fascia.chiave, { fascia, voci: [] });
+            bucket.get(fascia.chiave).voci.push(info);
+        });
+        let html = "";
+        let presenteAsterisco = false;
+        fasce.forEach((f) => {
+            const gruppo = bucket.get(f.chiave);
+            if (!gruppo || gruppo.voci.length === 0) return;
+            html += '<div class="tnt-group-label">' + f.etichetta + '</div>';
+            gruppo.voci.forEach((info) => {
+                const hh = String(info.orario.getHours()).padStart(2, "0");
+                const mm = String(info.orario.getMinutes()).padStart(2, "0");
+                const listaBaie = info.baie.filter(Boolean).join(", ");
+                if (listaBaie.indexOf("*") !== -1) presenteAsterisco = true;
+                html += '<div class="tnt-card ' + f.classe + '">'
+                    + '<div class="tnt-card-row">'
+                    + '<span class="tnt-card-title">' + info.nome + ' (' + info.baie.length + ')</span>'
+                    + '<span class="tnt-badge">' + hh + ':' + mm + '</span>'
+                    + '</div>'
+                    + '<div class="tnt-card-sub">Baie: ' + listaBaie + '</div>'
+                    + '</div>';
+            });
         });
         if (presenteAsterisco) {
-            html += '<div style="padding:6px 8px;font-size:10px;color:#ff3b30;font-family:Roboto,sans-serif;">* slittato al cutoff successivo per late arrival (meno di 150min di lavorazione disponibili)</div>';
+            html += '<div class="tnt-footnote">* slittato al cutoff successivo per late arrival (meno di 150min di lavorazione disponibili)</div>';
         }
-        panel.innerHTML = html;
+        panelBody.innerHTML = html;
     }
 
     function aggiornaPannelloOutbound() {
+        const body = document.getElementById("tnt-orologio-panel-body");
         const panel = document.getElementById("tnt-orologio-panel");
-        if (!panel || panel.style.display === "none") return;
+        if (!body || !panel || panel.style.display === "none") return;
         const risultati = leggiOutboundInScadenza();
         const ordineCategorie = ["Carico", "Parcheggio", "Freight"];
         const gruppi = { "Carico": [], "Parcheggio": [], "Freight": [] };
@@ -927,19 +988,19 @@
         ordineCategorie.forEach((cat) => {
             const lista = gruppi[cat];
             if (!lista || lista.length === 0) return;
-            html += '<div style="padding:6px 8px 3px;font-size:11px;font-weight:bold;text-transform:uppercase;opacity:0.6;letter-spacing:0.5px;font-family:Roboto,sans-serif;">' + cat + '</div>';
+            html += '<div class="tnt-group-label">' + cat + ' (' + lista.length + ')</div>';
             html += lista.map((r) => {
                 const minutiTesto = r.diffMinuti >= 0 ? Math.round(r.diffMinuti) + " min" : "In ritardo";
-                const classeDot = r.diffMinuti <= 30 ? "tnt-dot-rosso" : "tnt-dot-giallo";
-                return '<div style="display:flex;align-items:center;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.1);font-family:Roboto,sans-serif;">'
-                    + '<span class="' + classeDot + '"></span>'
-                    + '<span style="font-weight:bold;min-width:40px;color:#FF7A00;">' + r.door + '</span>'
-                    + '<span style="flex:1;color:#FF7A00;">' + r.destinazione + '</span>'
-                    + '<span style="opacity:0.8;font-size:12px;color:#FF7A00;font-weight:bold;">' + minutiTesto + '</span>'
+                const classeCard = r.diffMinuti <= 30 ? "tnt-card-rosso" : "tnt-card-ambra";
+                return '<div class="tnt-card ' + classeCard + '">'
+                    + '<div class="tnt-card-row">'
+                    + '<span class="tnt-card-title">' + r.door + (r.destinazione ? " · " + r.destinazione : "") + '</span>'
+                    + '<span class="tnt-badge">' + minutiTesto + '</span>'
+                    + '</div>'
                     + '</div>';
             }).join("");
         });
-        panel.innerHTML = html || '<div style="padding:6px 8px;opacity:0.7;font-family:Roboto,sans-serif;color:#FF7A00;">Nessuna baia in scadenza</div>';
+        body.innerHTML = html || '<div class="tnt-empty">Nessuna baia in scadenza</div>';
     }
 
     function creaIconaMenu(id, coloreCerchio, disegnoSvg) {
@@ -952,27 +1013,48 @@
         return btn;
     }
 
-    function creaPannello(id) {
+    // Crea un pannello agganciato "a scheda": header fisso con titolo/icona + pulsante di
+    // chiusura, e un corpo scorrevole (id + "-body") dove le funzioni di render inseriscono
+    // il contenuto. Il pannello e' alto quanto la colonna di icone a cui e' agganciato, cosi'
+    // copre tutta la sezione sottostante invece di restare un riquadro piccolo e sovrapposto.
+    function creaPannello(id, titolo, coloreIcona) {
         const panel = document.createElement("div");
         panel.id = id;
-        panel.style.cssText = "display:none;position:fixed;background:#2c2c2e;color:#fff;padding:6px;border-radius:6px;width:280px;z-index:99999;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:Roboto,sans-serif;";
+        panel.className = "tnt-panel";
+        panel.style.width = "320px";
+        panel.innerHTML =
+            '<div class="tnt-panel-header">' +
+                '<div class="tnt-panel-title"><span class="tnt-dot-titolo" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + coloreIcona + ';"></span>' + titolo + '</div>' +
+                '<span class="tnt-panel-close" title="Chiudi">&#10005;</span>' +
+            '</div>' +
+            '<div class="tnt-panel-body" id="' + id + '-body"></div>';
         document.body.appendChild(panel);
+        panel.querySelector(".tnt-panel-close").addEventListener("click", (e) => {
+            e.stopPropagation();
+            panel.style.display = "none";
+        });
         return panel;
     }
 
-    function collegaClick(btn, panel, callbackAggiorna, offsetExtra = 0) {
+    function chiudiTuttiIPannelli() {
+        document.querySelectorAll(".tnt-panel").forEach((p) => { p.style.display = "none"; });
+    }
+
+    function collegaClick(btn, panel, callbackAggiorna) {
         btn.addEventListener("click", (e) => {
             e.stopPropagation();
-            if (panel.style.display !== "none") {
-                panel.style.display = "none";
-                return;
-            }
-            const primoBottone = document.getElementById("tnt-orologio-btn");
-            const rectRiferimento = primoBottone ? primoBottone.getBoundingClientRect() : btn.getBoundingClientRect();
-            const rectCorrente = btn.getBoundingClientRect();
-            panel.style.top = rectRiferimento.top + "px";
-            panel.style.left = (rectCorrente.right + 8 + offsetExtra) + "px";
-            panel.style.display = "block";
+            const eraAperto = panel.style.display !== "none" && panel.style.display !== "";
+            chiudiTuttiIPannelli();
+            if (eraAperto) return;
+            // Il pannello si aggancia subito a destra della colonna di icone e ne eredita
+            // l'altezza, cosi' da coprire tutta la zona sottostante invece di fluttuare.
+            const menu = document.querySelector(".cc-hub-menu-panel");
+            const rectMenu = menu ? menu.getBoundingClientRect() : btn.getBoundingClientRect();
+            const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
+            panel.style.top = rectMenu.top + "px";
+            panel.style.left = rectMenu.right + "px";
+            panel.style.height = Math.max(altezzaDisponibile, 200) + "px";
+            panel.style.display = "flex";
             callbackAggiorna();
         });
         panel.addEventListener("click", (e) => e.stopPropagation());
@@ -988,8 +1070,8 @@
             const btn = creaIconaMenu("tnt-orologio-btn", "#ffffff", disegnoOrologio);
             btn.title = "Unit Ready in scadenza (Outbound)";
             menu.appendChild(btn);
-            panelOrologio = creaPannello("tnt-orologio-panel");
-            collegaClick(btn, panelOrologio, aggiornaPannelloOutbound, 0);
+            panelOrologio = creaPannello("tnt-orologio-panel", "Carico - unit ready in scadenza", "#ffffff");
+            collegaClick(btn, panelOrologio, aggiornaPannelloOutbound);
         }
         
         if (!document.getElementById("tnt-orologio-scarico-btn")) {
@@ -997,8 +1079,9 @@
             const btn2 = creaIconaMenu("tnt-orologio-scarico-btn", "#ffcc00", disegnoScarico);
             btn2.title = "Carichi in scadenza cutoff (Scarico)";
             menu.appendChild(btn2);
-            const panel2 = creaPannello("tnt-orologio-scarico-panel");
-            collegaClick(btn2, panel2, () => scansionaBaieScarico(panel2), 290);
+            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", "#ffcc00");
+            const body2 = document.getElementById("tnt-orologio-scarico-panel-body");
+            collegaClick(btn2, panel2, () => scansionaBaieScarico(body2));
         }
 
         // Inserimento del pulsante Report CSV direttamente dentro la barra laterale sotto il secondo orologio
@@ -1007,11 +1090,17 @@
             const btnReport = creaIconaMenu("tnt-btn-scarica-report", "#FF7A00", disegnoReport);
             btnReport.title = "Scarica Report Turno CSV";
 
-            const panelReport = creaPannello("tnt-report-panel");
-            collegaClick(btnReport, panelReport, () => renderPannelloReport(panelReport), 0);
+            const panelReport = creaPannello("tnt-report-panel", "Esporta report turno", "#FF7A00");
+            const bodyReport = document.getElementById("tnt-report-panel-body");
+            collegaClick(btnReport, panelReport, () => renderPannelloReport(bodyReport));
             menu.appendChild(btnReport);
         }
     }
+
+    document.addEventListener("click", (e) => {
+        if (e.target.closest(".tnt-panel") || e.target.closest(".cc-menu-button")) return;
+        chiudiTuttiIPannelli();
+    });
 
     document.addEventListener("click", (e) => {
         const wrapper = e.target.closest('[id^="unit_"]');
