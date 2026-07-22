@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.7
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -21,7 +21,7 @@
         };
         XMLHttpRequest.prototype.send = function (body) {
             this.addEventListener("load", function () {
-                try {
+                 try {
                     if (this._tntUrl && String(this._tntUrl).indexOf("dockingDoors") !== -1) {
                         elaboraRispostaDockingDoors(JSON.parse(this.responseText));
                         return;
@@ -67,24 +67,15 @@
         if (!voce || !voce.unitId) return null;
         const mov = cacheMovimentiPerUnit.get(String(voce.unitId));
         if (!mov || !mov.origin) return null;
-
-        // Preferiamo l'arrivo reale (actualArrival) allo Sched./Estimated Arrival per stabilire
-        // la categoria/cutoff di competenza: usare solo l'orario schedulato puo' produrre cutoff
-        // gia' passati (es. codici con cutoff nelle prime ore del mattino il cui Sched. Arrival
-        // era gia' nelle prime ore dello stesso giorno).
         const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
         if (!arrivoIso) return null;
         const arrivo = new Date(arrivoIso);
         if (isNaN(arrivo.getTime())) return null;
-
-        // Orario di arrivo REALE alla porta (quando il camion e' stato fisicamente agganciato
-        // alla baia): e' il riferimento usato per la regola dei 150 minuti di lavorazione.
         let arrivoPortaReale = null;
         if (voce.orario) {
             const d = new Date(voce.orario);
             if (!isNaN(d.getTime())) arrivoPortaReale = d;
         }
-
         const risultato = calcolaCutoffPerCodice(mov.origin, arrivo, arrivoPortaReale);
         if (!risultato) return null;
         return { cutoff: risultato, codice: mov.origin };
@@ -160,7 +151,6 @@
         { nome: "Hub Export/Sud", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["AN6", "FIA", "NC3", "NT3", "GDEC", "COFR", "UFAL", "APLE"] },
         { nome: "Import Anticipi", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["LYS", "MRS", "NT3", "BA5"] }
     ];
-
     const SOGLIA_OUTBOUND_MINUTI = 60;
     const SOGLIA_SCARICO_MINUTI = 500;
 
@@ -168,19 +158,13 @@
         if (/^P/i.test(door)) return "Parcheggio";
         const n = parseInt(door, 10);
         if (!isNaN(n)) {
-            const inScarico = (n >= 101 && n <= 107) ||
-                (n >= 10 && n <= 14) || (n >= 201 && n <= 207) ||
-                (n >= 601 && n <= 609) || (n >= 501 && n <= 509);
+            const inScarico = (n >= 101 && n <= 107) || (n >= 10 && n <= 14) || (n >= 201 && n <= 207) || (n >= 601 && n <= 609) || (n >= 501 && n <= 509);
             if (inScarico) return "Scarico";
             if (n >= 301 && n <= 456) return "Carico";
         }
         return "Freight";
     }
 
-    // Costruisce, a partire da un elenco di categorie, la lista di tutti gli orari di cutoff
-    // distinti definiti nel sistema (indipendentemente dai codici). Serve per trovare il
-    // "prossimo cutoff utile" quando un camion arrives troppo tardi per quello naturalmente
-    // assegnato al proprio codice.
     function elencoSlotCutoffUnici() {
         const visti = new Set();
         const slot = [];
@@ -195,9 +179,6 @@
     }
     const SLOT_CUTOFF_UNICI = elencoSlotCutoffUnici();
 
-    // Trova il primo cutoff (tra TUTTI quelli definiti nel sistema, non solo quelli del codice)
-    // successivo a "cutoffBase" che garantisce almeno 150 minuti di margine rispetto
-    // all'orario di arrivo reale alla baia. Restituisce null se non ne trova uno entro 2 giorni.
     function trovaProssimoCutoffConMargine(cutoffBase, arrivoPortaReale) {
         const candidati = [];
         for (let offset = 0; offset <= 2; offset++) {
@@ -217,9 +198,6 @@
     function calcolaCutoffPerCodice(codice, arrivo, arrivoPortaReale) {
         const candidati = CATEGORIE.filter((c) => c.codici.includes(codice));
         if (candidati.length === 0) return null;
-
-        // Per ogni categoria che comprende questo codice, prendiamo SOLO la prima
-        // occorrenza futura del suo cutoff (non tutte le ricorrenze sui giorni successivi).
         const choices = [];
         candidati.forEach((cat) => {
             for (let offset = -1; offset <= 2; offset++) {
@@ -232,7 +210,6 @@
         });
         if (choices.length === 0) return null;
         choices.sort((a, b) => a.cutoffDate.getTime() - b.cutoffDate.getTime());
-
         let risultato = null;
         if (choices.length > 1) {
             for (let i = 0; i < choices.length; i++) {
@@ -244,10 +221,6 @@
             risultato = choices[0];
         }
 
-        // Regola dei 150 minuti di lavorazione sull'arrivo REALE alla baia: se il camion e'
-        // gia' fisicamente arrivato alla porta e tra quell'orario e il cutoff assegnato non ci
-        // sono almeno 150 minuti (oppure il cutoff assegnato e' gia' passato), il camion slitta
-        // al primo cutoff successivo - tra TUTTI quelli del sistema - che garantisce il margine.
         if (arrivoPortaReale && !isNaN(arrivoPortaReale.getTime())) {
             const margineReale = (risultato.cutoffDate.getTime() - arrivoPortaReale.getTime()) / 60000;
             if (margineReale < 150) {
@@ -296,7 +269,6 @@
 
     const TARGET_SELECTOR = ".door-info__movmt-value, .inbound-origin-en-route, .inbound-origin";
     const CODE_ATTR = "data-tnt-code";
-
     function traduciBlocco(el) {
         let textNode = null;
         for (const child of el.childNodes) {
@@ -444,10 +416,7 @@
                     const colCutoff = creaColTurno("Orario Cutoff", testoCutoff, risultato.ritardo ? "col-4" : "col-4");
                     if (risultato.ritardo) {
                         const valEl = colCutoff.querySelector(".door-info__movmt-value");
-                        if (valEl) {
-                            valEl.style.color = "#ff3b30";
-                            valEl.title = "Cutoff slittato: meno di 150 minuti di lavorazione tra l'arrivo reale alla baia e il cutoff originale";
-                        }
+                        if (valEl) { valEl.style.color = "#ff3b30"; valEl.title = "Cutoff slittato: meno di 150 minuti di lavorazione tra l'arrivo reale alla baia e il cutoff originale"; }
                     }
                     riga.appendChild(colCutoff);
                 } else {
@@ -460,10 +429,8 @@
         });
     }
 
-    // Colori con cui l'interfaccia YOS marca una unita' come "pronta" (docking indicator blu/verde-acqua).
     const COLORI_UNIT_PRONTA = ["rgb(135,185,172)"];
 
-    // Determina se una riga di outbound e' gia' "pronta" (unit ready) e va quindi esclusa dal menu Carico.
     function rigaSegnalataPronta(riga) {
         if (riga.querySelector(".unit_ready_outline") || riga.classList.contains("unit_ready_outline")) return true;
         const dockingBg = riga.querySelector('[id^="dockingBg_"]');
@@ -479,58 +446,75 @@
     }
 
     function leggiOutboundInScadenza() {
+        const righe = document.querySelectorAll(".scheduled-root.outbound-task, .scheduled-root.highlight-task, .scheduled-root.highlight-undeparted-unit");
         const risultati = [];
-        const righe = document.querySelectorAll("#outboundListTable tr, table[id*='outbound'] tr, tr.outbound-row");
+        const ora = new Date();
         righe.forEach((riga) => {
+            const doorEl = riga.querySelector(".outbound-door-number span");
+            const dataEl = riga.querySelector(".outbound-dates-position-change");
+            const destEl = riga.querySelector(".outbound-current-destination");
+            if (!doorEl || !dataEl) return;
+            const door = doorEl.textContent.trim();
+            const testo = dataEl.textContent.trim();
+            if (!testo || testo.toUpperCase().includes("N/A") || door === "-" || !door || categoriaBaia(door) === "Scarico") return;
             if (rigaSegnalataPronta(riga)) return;
-            const celle = riga.querySelectorAll("td");
-            if (celle.length < 2) return;
-            let testoOrario = "", testoDestinazione = "";
-            celle.forEach((c) => {
-                const t = c.textContent.trim();
-                if (/^\d{2}:\d{2}$/.test(t) && !testoOrario) testoOrario = t;
-                const m = t.match(/\b([A-Z0-9]{3})\b/);
-                if (m && codeMap[m[1]] && !testoDestinazione) testoDestinazione = m[1];
-            });
-            if (!testoOrario || !testoDestinazione) return;
-            const parti = testoOrario.split(":");
-            const oraTarget = new Date();
-            oraTarget.setHours(parseInt(parti[0], 10), parseInt(parti[1], 10), 0, 0);
-            const oraCorr = new Date();
-            let diffMinuti = (oraTarget.getTime() - oraCorr.getTime()) / 60000;
-            if (diffMinuti < -300) diffMinuti += 1440;
-            if (diffMinuti <= SOGLIA_OUTBOUND_MINUTI) {
-                risultati.push({
-                    destinazione: testoDestinazione,
-                    nomeEsteso: codeMap[testoDestinazione] || testoDestinazione,
-                    orarioStr: testoOrario,
-                    minutiMancanti: Math.round(diffMinuti)
-                });
+            const match = testo.match(/(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
+            if (!match) return;
+            const giorno = parseInt(match[1], 10), mese = parseInt(match[2], 10), ore = parseInt(match[3], 10), minuti = parseInt(match[4], 10);
+            const partenza = new Date(ora.getFullYear(), mese - 1, giorno, ore, minuti);
+            const pronto = new Date(partenza.getTime() - 20 * 60000);
+            const diffMinuti = (pronto.getTime() - ora.getTime()) / 60000;
+            if (diffMinuti <= SOGLIA_OUTBOUND_MINUTI && diffMinuti > -60) {
+                risultati.push({ door, destinazione: destEl ? destEl.textContent.trim() : "", diffMinuti, categoria: categoriaBaia(door) });
             }
         });
-        risultati.sort((a, b) => a.minutiMancanti - b.minutiMancanti);
+        risultati.sort((a, b) => a.diffMinuti - b.diffMinuti);
+        const visti = new Set();
+        return risultati.filter((r) => {
+            const chiave = r.door + "|" + r.destinazione;
+            if (visti.has(chiave)) return false;
+            visti.add(chiave);
+            return true;
+        });
+    }
+
+    const DOOR_NUM_SELECTOR_SCARICO = ".door_number, .west_door_number, .east_door_number, .reverse_door_number";
+    function trovaBaieScaricoOccupate() {
+        const risultati = [];
+        document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO).forEach((numEl) => {
+            const span = numEl.querySelector("span");
+            if (!span) return;
+            const doorNumber = span.textContent.trim();
+            if (!doorNumber || categoriaBaia(doorNumber) !== "Scarico") return;
+            const wrapper = numEl.closest('[id^="unit_"]');
+            if (!wrapper) return;
+            const container = wrapper.querySelector('[id^="container_"].unit-assigned');
+            if (!container) return;
+            risultati.push({ doorNumber, container });
+        });
         return risultati;
     }
 
-    const KEY_ARRIVI = "yos_arrivi_baia_v1";
-    const KEY_STORICO_REPORT = "yos_storico_report_v1";
-    const GIORNI_CONSERVAZIONE_STORICO = 3;
+    const STORAGE_KEY_ARRIVI = "tnt_arrivi_baia_scarico_v1";
+    const STORAGE_KEY_STORICO = "tnt_storico_report_scarico_v1";
+    const assenzeConsecutive = new Map();
+    let baiaSelezionata = null;
 
     function caricaArriviBaia() {
-        try { return JSON.parse(localStorage.getItem(KEY_ARRIVI) || "{}"); } catch (e) { return {}; }
+        try { const raw = localStorage.getItem(STORAGE_KEY_ARRIVI); return raw ? JSON.parse(raw) : {}; } catch (e) { return {}; }
     }
-
     function salvaArriviBaia(dati) {
-        try { localStorage.setItem(KEY_ARRIVI, JSON.stringify(dati)); } catch (e) {}
+        try { localStorage.setItem(STORAGE_KEY_ARRIVI, JSON.stringify(dati)); } catch (e) {}
     }
 
     function caricaStoricoReport() {
-        try { return JSON.parse(localStorage.getItem(KEY_STORICO_REPORT) || "[]"); } catch (e) { return []; }
+        try { const raw = localStorage.getItem(STORAGE_KEY_STORICO); return raw ? JSON.parse(raw) : []; } catch (e) { return []; }
+    }
+    function salvaStoricoReport(dati) {
+        try { localStorage.setItem(STORAGE_KEY_STORICO, JSON.stringify(dati)); } catch (e) {}
     }
 
-    function salvaStoricoReport(dati) {
-        try { localStorage.setItem(KEY_STORICO_REPORT, JSON.stringify(dati)); } catch (e) {}
-    }
+    const GIORNI_CONSERVAZIONE_STORICO = 3;
 
     function pulisciStoricoVecchio() {
         const storico = caricaStoricoReport();
@@ -551,41 +535,38 @@
 
         const dataArrivo = new Date(orarioIso);
         const orarioFormattato = String(dataArrivo.getHours()).padStart(2, "0") + ":" + String(dataArrivo.getMinutes()).padStart(2, "0");
-        const dataFormattata = String(dataArrivo.getDate()).padStart(2, "0") + "/" + String(dataArrivo.getMonth() + 1).padStart(2, "0") + "/" + dataArrivo.getFullYear();
+        const dataFormattata = String(dataArrivo.getDate()).padStart(2, "0") + "/" + String(dataArrivo.getMonth() + 1).padStart(2, "0");
 
-        const mov = cacheMovimentiPerUnit.get(String(unitId)) || {};
-        const codiceOrigine = mov.origin || "N/A";
-        const localita = codeMap[codiceOrigine] || codiceOrigine;
-
-        let viaggioStr = "N/A";
-        if (mov.tripTourDescription) {
-            viaggioStr = mov.tripTourDescription;
-        } else if (mov.movementName) {
-            viaggioStr = mov.movementName;
-        }
-
+        let codiceOrigine = "N/A";
+        let localita = "N/A";
+        let viaggio = "N/A";
         let cutoffOrario = "N/A";
         let cutoffTurno = "N/A";
         let cutoffTipo = "N/A";
         let ritardoFlag = "No";
         let cutoffOriginaleTesto = "";
 
-        const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
-        if (codiceOrigine !== "N/A" && arrivoIso) {
-            const arrivoObj = new Date(arrivoIso);
-            if (!isNaN(arrivoObj.getTime())) {
-                const res = calcolaCutoffPerCodice(codiceOrigine, arrivoObj, dataArrivo);
-                if (res) {
-                    const hh = String(res.cutoffDate.getHours()).padStart(2, "0");
-                    const mm = String(res.cutoffDate.getMinutes()).padStart(2, "0");
-                    cutoffOrario = hh + ":" + mm;
-                    cutoffTurno = res.cat ? res.cat.turno : "N/A";
-                    cutoffTipo = res.cat ? res.cat.nome : "N/A";
-                    if (res.ritardo && res.cutoffOriginale) {
-                        ritardoFlag = "Si";
-                        const hhO = String(res.cutoffOriginale.getHours()).padStart(2, "0");
-                        const mmO = String(res.cutoffOriginale.getMinutes()).padStart(2, "0");
-                        cutoffOriginaleTesto = hhO + ":" + mmO;
+        if (unitId) {
+            const mov = cacheMovimentiPerUnit.get(String(unitId));
+            if (mov) {
+                codiceOrigine = mov.origin || "N/A";
+                localita = codeMap[codiceOrigine] || "N/A";
+                viaggio = mov.movementName || "N/A";
+                if (mov.tripTourDescription) viaggio += " (" + mov.tripTourDescription + ")";
+
+                const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
+                if (arrivoIso) {
+                    const arrivoDate = new Date(arrivoIso);
+                    const arrivoPortaReale = new Date(orarioIso);
+                    const res = calcolaCutoffPerCodice(codiceOrigine, arrivoDate, !isNaN(arrivoPortaReale.getTime()) ? arrivoPortaReale : null);
+                    if (res) {
+                        cutoffOrario = String(res.cutoffDate.getHours()).padStart(2, "0") + ":" + String(res.cutoffDate.getMinutes()).padStart(2, "0");
+                        cutoffTurno = res.cat.turno;
+                        cutoffTipo = res.cat.nome;
+                        if (res.ritardo && res.cutoffOriginale) {
+                            ritardoFlag = "Si";
+                            cutoffOriginaleTesto = String(res.cutoffOriginale.getHours()).padStart(2, "0") + ":" + String(res.cutoffOriginale.getMinutes()).padStart(2, "0");
+                        }
                     }
                 }
             }
@@ -593,31 +574,32 @@
 
         storico.push({
             data: dataFormattata,
-            doorNumber: doorNumber,
-            unitId: unitId,
+            timestampIso: orarioIso,
+            doorNumber,
+            unitId: unitId || "N/A",
             orarioArrivo: orarioFormattato,
-            codiceOrigine: codiceOrigine,
-            localita: localita,
-            viaggio: viaggioStr,
-            cutoffOrario: cutoffOrario,
-            cutoffTurno: cutoffTurno,
-            cutoffTipo: cutoffTipo,
-            ritardoFlag: ritardoFlag,
-            cutoffOriginaleTesto: cutoffOriginaleTesto,
-            timestampIso: orarioIso
+            codiceOrigine,
+            localita,
+            viaggio,
+            cutoffOrario,
+            cutoffTurno,
+            cutoffTipo,
+            ritardoFlag,
+            cutoffOriginaleTesto
         });
-
         salvaStoricoReport(storico);
     }
 
-    function esportaReportCSV(dataInizioStr, dataFineStr) {
-        pulisciStoricoVecchio();
+    function scaricaReportCSV(dataInizioStr, dataFineStr) {
         let storico = caricaStoricoReport();
+        if (storico.length === 0) {
+            alert("Nessun dato registrato per il report.");
+            return;
+        }
 
         if (dataInizioStr || dataFineStr) {
             const inizio = dataInizioStr ? new Date(dataInizioStr + "T00:00:00") : null;
             const fine = dataFineStr ? new Date(dataFineStr + "T23:59:59") : null;
-
             storico = storico.filter((r) => {
                 if (!r.timestampIso) return true;
                 const d = new Date(r.timestampIso);
@@ -644,60 +626,79 @@
         const encodedUri = encodeURI(csvContent);
         const link = document.createElement("a");
         link.setAttribute("href", encodedUri);
-        const suffisso = (dataInizioStr || dataFineStr) ? `_${dataInizioStr || 'inizio'}_al_${dataFineStr || 'fine'}` : "_totale";
-        link.setAttribute("download", `Report_Arrivi_Baie${suffisso}.csv`);
+        const suffisso = (dataInizioStr || dataFineStr)
+            ? `_${dataInizioStr || "inizio"}_a_${dataFineStr || "fine"}`
+            : `_TUTTO_${new Date().toISOString().slice(0,10)}`;
+        link.setAttribute("download", `REPORT_TURNO_YOS${suffisso}.csv`);
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
     }
 
-    let baiaSelezionata = null;
+    function renderPannelloReport(panelBody) {
+        const oggi = new Date().toISOString().slice(0, 10);
+        panelBody.innerHTML =
+            '<label>Dal giorno</label>' +
+            '<input type="date" id="tnt-report-data-inizio" value="' + oggi + '">' +
+            '<label>Al giorno</label>' +
+            '<input type="date" id="tnt-report-data-fine" value="' + oggi + '">' +
+            '<button id="tnt-report-btn-scarica" class="tnt-btn-primary">Scarica CSV periodo</button>' +
+            '<button id="tnt-report-btn-tutto" class="tnt-btn-secondary">Scarica tutto lo storico</button>';
 
-    function monitoraBaiaSelezionata() {
-        const spanDoor = document.querySelector(".door-info__header--door-text");
-        if (spanDoor) {
-            const m = spanDoor.textContent.match(/Door\s+([A-Za-z0-9]+)/i);
-            baiaSelezionata = m ? m[1] : null;
-        } else {
-            baiaSelezionata = null;
-        }
+        document.getElementById("tnt-report-btn-scarica").addEventListener("click", (e) => {
+            e.stopPropagation();
+            const dataInizio = document.getElementById("tnt-report-data-inizio").value;
+            const dataFine = document.getElementById("tnt-report-data-fine").value;
+            scaricaReportCSV(dataInizio || null, dataFine || null);
+        });
+        document.getElementById("tnt-report-btn-tutto").addEventListener("click", (e) => {
+            e.stopPropagation();
+            scaricaReportCSV(null, null);
+        });
     }
 
-    function trovaRigaPerChiave(ambito, chiavi) {
+    function aggiornaTracciamentoArrivi() {
+        const arrivi = caricaArriviBaia();
+        let modificato = false;
+        document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO).forEach((numEl) => {
+            const span = numEl.querySelector("span");
+            if (!span) return;
+            const doorNumber = span.textContent.trim();
+            if (!doorNumber || categoriaBaia(doorNumber) !== "Scarico") return;
+            const wrapper = numEl.closest('[id^="unit_"]');
+            if (!wrapper) return;
+            const container = wrapper.querySelector('[id^="container_"].unit-assigned');
+            if (container) {
+                assenzeConsecutive.set(doorNumber, 0);
+                if (!arrivi[doorNumber]) {
+                    arrivi[doorNumber] = { unitId: null, orario: new Date().toISOString() };
+                    modificato = true;
+                }
+            } else {
+                const conteggio = (assenzeConsecutive.get(doorNumber) || 0) + 1;
+                assenzeConsecutive.set(doorNumber, conteggio);
+                if (conteggio >= 2 && arrivi[doorNumber]) {
+                    delete arrivi[doorNumber];
+                    modificato = true;
+                }
+            }
+        });
+        if (modificato) salvaArriviBaia(arrivi);
+    }
+
+    function trovaRigaPerChiavi(ambito, chiavi) {
         const keys = ambito.querySelectorAll(".door-info__movmt-key");
         for (const k of keys) {
-            const t = k.textContent.trim();
-            if (chiavi.includes(t)) return k.closest(".row");
+            if (chiavi.includes(k.textContent.trim())) return k.closest(".row") || k.closest(".door-info__movmt-section-row");
         }
         return null;
-    }
-
-    function creaColCustom(chiaveTesto, valoreTesto, coloreValore = "#FF7A00") {
-        const col = document.createElement("div");
-        col.className = "col-4";
-        const key = document.createElement("div");
-        key.className = "door-info__movmt-key";
-        key.textContent = chiaveTesto;
-        key.style.cssText = "color:#FF7A00; font-family:Roboto,sans-serif;";
-        const divd = document.createElement("div");
-        divd.className = "door-info__divd-mvmt";
-        const val = document.createElement("div");
-        val.className = "door-info__movmt-value";
-        val.textContent = valoreTesto;
-        val.style.cssText = `color:${coloreValore}; font-weight:bold; font-family:Roboto,sans-serif; font-size:15px;`;
-        col.appendChild(key);
-        col.appendChild(divd);
-        col.appendChild(val);
-        return col;
     }
 
     function aggiornaRigaArrivoECountdown(ambito, risultato) {
         const vecchia = ambito.querySelector(".tnt-custom-info-row");
         if (vecchia) vecchia.remove();
-
-        const rigaRemarks = trovaRigaPerChiave(ambito, ["Arrival Remarks", "YOS Remarks"]);
+        const rigaRemarks = trovaRigaPerChiavi(ambito, ["Arrival Remarks", "YOS Remarks"]);
         if (!rigaRemarks) return;
-
         let valoreArrivo = "N/A";
         if (baiaSelezionata) {
             const arrivi = caricaArriviBaia();
@@ -707,7 +708,6 @@
                 valoreArrivo = String(dataArrivo.getHours()).padStart(2, "0") + ":" + String(dataArrivo.getMinutes()).padStart(2, "0");
             }
         }
-
         let valoreCountdown = "N/A";
         if (risultato && risultato.cutoffDate) {
             const diffMs = risultato.cutoffDate.getTime() - new Date().getTime();
@@ -723,43 +723,69 @@
                 valoreCountdown = `In ritardo di ${ore > 0 ? ore + 'h ' : ''}${minuti}m`;
             }
         }
-
         const rigaNuova = document.createElement("div");
         rigaNuova.className = "row door-info__movmt-section-row tnt-custom-info-row";
-        rigaNuova.appendChild(creaColCustom("Ora Arrivo Reale", valoreArrivo));
-        rigaNuova.appendChild(creaColCustom("Tempo Rimasto", valoreCountdown));
-        rigaRemarks.parentNode.insertBefore(rigaNuova, rigaRemarks.nextSibling);
+        rigaNuova.style.marginTop = "10px";
+        const colArrivo = creaColTurno("Orario Arrivo Camion", valoreArrivo, "col-6");
+        const colCountdown = creaColTurno("Countdown Cutoff", valoreCountdown, "col-6");
+        const valSpan = colCountdown.querySelector(".door-info__movmt-value");
+        if (valSpan && risultato && risultato.cutoffDate) {
+            const diffMs = risultato.cutoffDate.getTime() - new Date().getTime();
+            if (diffMs < 0) valSpan.style.color = "#ff3b30";
+            else if (diffMs <= 30 * 60000) valSpan.style.color = "#ffcc00";
+            else valSpan.style.color = "#4cd964";
+        }
+        rigaNuova.appendChild(colArrivo);
+        rigaNuova.appendChild(colCountdown);
+        rigaRemarks.insertAdjacentElement("afterend", rigaNuova);
     }
 
-    function trovaCutoffBaia(doorEl) {
-        if (!doorEl) return null;
-        const box = doorEl.closest(".door_box_occupied, .door_box, .west_door_occupied, .east_door_occupied, [class*='door_box']");
-        if (!box) return null;
-        const valueEl = box.querySelector(".door-info__movmt-value, .inbound-origin-en-route, .inbound-origin");
-        const codiceOrigine = estraiCodiceGrezzo(valueEl);
-        if (!codiceOrigine) return null;
-
-        const schedEl = box.querySelector(".inbound-scheduled-time, [class*='scheduled']");
-        let arrivo = null;
-        if (schedEl) {
-            const t = schedEl.textContent.trim();
-            arrivo = parseDataOraSlash(t);
-        }
-        if (!arrivo) arrivo = new Date();
-
-        const doorNumberTesto = doorEl.textContent.trim();
-        let arrivoPortaReale = null;
-        if (doorNumberTesto) {
-            const arriviSalvati = caricaArriviBaia();
-            const voceBaia = arriviSalvati[doorNumberTesto];
-            if (voceBaia && voceBaia.orario) {
-                const d = new Date(voceBaia.orario);
-                if (!isNaN(d.getTime())) arrivoPortaReale = d;
+    function assicuraTabInbound() {
+        const nav = document.querySelectorAll(".door-info__header--nav-text");
+        for (const el of nav) {
+            if (el.textContent.trim() === "INBOUND") {
+                if (!el.classList.contains("door-info__header--nav-text--selected")) el.click();
+                return true;
             }
         }
+        return false;
+    }
 
-        const cutoffRes = calcolaCutoffPerCodice(codiceOrigine, arrivo, arrivoPortaReale);
-        if (cutoffRes) return { cutoff: cutoffRes, codice: codiceOrigine };
+    function leggiCutoffBaiaCorrente() {
+        const originClassEl = document.querySelector(".inbound-origin-en-route, .inbound-origin");
+        let codiceOrigine = null;
+        if (originClassEl && originClassEl.textContent.trim()) codiceOrigine = estraiCodiceGrezzo(originClassEl);
+        const contenitori = document.querySelectorAll(".door-info__movmt-no-left-padding");
+        for (const contenitore of contenitori) {
+            const sezione = contenitore.querySelector(".door-info__movmt-section");
+            if (!sezione) continue;
+            if (!codiceOrigine) codiceOrigine = estraiCodiceGrezzo(trovaValorePerChiave(sezione, "Origin"));
+            const arrivoEl = trovaValorePerChiave(sezione, "Sched. Arrival");
+            if (!arrivoEl || !codiceOrigine) continue;
+            const testoArrivo = arrivoEl.textContent.trim();
+            if (testoArrivo.toUpperCase().includes("N/A")) continue;
+            let arrivo = parseDataOraSlash(testoArrivo);
+            if (!arrivo) continue;
+            const actualArrivoEl = trovaValorePerChiave(sezione, "Actual Arrival");
+            if (actualArrivoEl) {
+                const testoActual = actualArrivoEl.textContent.trim();
+                if (testoActual && !testoActual.toUpperCase().includes("N/A")) {
+                    const arrivoReale = parseDataOraSlash(testoActual);
+                    if (arrivoReale) arrivo = arrivoReale;
+                }
+            }
+            let arrivoPortaReale = null;
+            if (baiaSelezionata) {
+                const arriviSalvati = caricaArriviBaia();
+                const voceBaia = arriviSalvati[baiaSelezionata];
+                if (voceBaia && voceBaia.orario) {
+                    const d = new Date(voceBaia.orario);
+                    if (!isNaN(d.getTime())) arrivoPortaReale = d;
+                }
+            }
+            const cutoffRes = calcolaCutoffPerCodice(codiceOrigine, arrivo, arrivoPortaReale);
+            if (cutoffRes) return { cutoff: cutoffRes, codice: codiceOrigine };
+        }
         return null;
     }
 
@@ -767,340 +793,308 @@
         const gruppi = new Map();
         const ora = new Date();
         let trovatoQualcosa = false;
-
         function aggiungiAlGruppo(risultato, infoBaia) {
             const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
             if (diffMinuti > SOGLIA_SCARICO_MINUTI) return;
-
+            const senzaBaiaAssegnata = /^\(.*\)$/.test(infoBaia);
+            if (senzaBaiaAssegnata && diffMinuti < 150) return;
             const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
             const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
-            const chiaveGruppo = `${risultato.cat.nome}|${hh}:${mm}`;
-
-            if (!gruppi.has(chiaveGruppo)) {
-                gruppi.set(chiaveGruppo, {
-                    nomeCategoria: risultato.cat.nome,
-                    orarioStr: `${hh}:${mm}`,
-                    diffMinuti: diffMinuti,
-                    baie: []
-                });
-            }
-            gruppi.get(chiaveGruppo).baie.push(infoBaia);
-            trovatoQualcosa = true;
+            const chiave = risultato.cat.nome + "|" + hh + ":" + mm;
+            if (!gruppi.has(chiave)) gruppi.set(chiave, { nome: risultato.cat.nome, turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
+            gruppi.get(chiave).baie.push(risultato.ritardo ? infoBaia + "*" : infoBaia);
         }
-
-        const porteDom = document.querySelectorAll(".door_number, .west_door_number, .east_door_number, .reverse_door_number");
-        porteDom.forEach((doorEl) => {
-            const doorNumber = doorEl.textContent.trim();
-            if (categoriaBaia(doorNumber) !== "Scarico") return;
-            const res = trovaCutoffBaia(doorEl);
-            if (!res) return;
-            const nomeEsteso = codeMap[res.codice] || res.codice;
-            aggiungiAlGruppo(res.cutoff, `${doorNumber} (${nomeEsteso})`);
+        const scheduledElements = document.querySelectorAll(".schedule_units");
+        if (scheduledElements.length > 0) trovatoQualcosa = true;
+        const movimentiScheduledVisti = new Set();
+        scheduledElements.forEach((el) => {
+            const idEl = el.querySelector(".scheduled-movement-id");
+            const originEl = el.querySelector(".scheduled-orgin");
+            const arrivalEl = el.querySelector(".scheduled-sta");
+            if (!originEl || !arrivalEl) return;
+            const movementId = idEl ? idEl.textContent.trim() : null;
+            if (movementId) {
+                if (movimentiScheduledVisti.has(movementId)) return;
+                movimentiScheduledVisti.add(movementId);
+            }
+            const codiceOrigine = estraiCodiceGrezzo(originEl);
+            const testoArrivo = arrivalEl.textContent.trim();
+            if (!codiceOrigine || !testoArrivo || testoArrivo.toUpperCase().includes("N/A")) return;
+            const arrivo = parseDataOraSlash(testoArrivo);
+            if (!arrivo) return;
+            const risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo);
+            if (!risultato) return;
+            aggiungiAlGruppo(risultato, "(" + codiceOrigine + ")");
         });
-
-        const arrivi = caricaArriviBaia();
-        Object.keys(arrivi).forEach((doorNumber) => {
-            if (categoriaBaia(doorNumber) !== "Scarico") return;
-            const res = calcolaCutoffDaCacheMovimenti(doorNumber);
-            if (!res) return;
-            const giaPresente = Array.from(porteDom).some((el) => el.textContent.trim() === doorNumber);
-            if (giaPresente) return;
-            const nomeEsteso = codeMap[res.codice] || res.codice;
-            aggiungiAlGruppo(res.cutoff, `${doorNumber} (${nomeEsteso})`);
+        const unitElements = document.querySelectorAll(".arrival_units");
+        if (unitElements.length > 0) trovatoQualcosa = true;
+        unitElements.forEach((el) => {
+            const originEl = el.querySelector(".inbound-origin-en-route, .inbound-origin");
+            const arrivalEl = el.querySelector(".arrival-time-en-route, .arrival-time");
+            if (!originEl || !arrivalEl) return;
+            const codiceOrigine = estraiCodiceGrezzo(originEl);
+            const testoArrivo = arrivalEl.textContent.trim();
+            if (!codiceOrigine || testoArrivo.toUpperCase().includes("N/A")) return;
+            const arrivo = parseDataOraSlash(testoArrivo);
+            if (!arrivo) return;
+            const doorEl = el.querySelector(".door_number, .west_door_number, .east_door_number, .reverse_door_number");
+            const doorNumberTesto = doorEl ? doorEl.textContent.trim() : null;
+            let arrivoPortaReale = null;
+            if (doorNumberTesto) {
+                const arriviSalvati = caricaArriviBaia();
+                const voceBaia = arriviSalvati[doorNumberTesto];
+                if (voceBaia && voceBaia.orario) {
+                    const d = new Date(voceBaia.orario);
+                    if (!isNaN(d.getTime())) arrivoPortaReale = d;
+                }
+            }
+            const risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo, arrivoPortaReale);
+            if (!risultato) return;
+            aggiungiAlGruppo(risultato, doorNumberTesto || "(" + codiceOrigine + ")");
         });
-
+        const baie = trovaBaieScaricoOccupate();
+        if (baie.length > 0) trovatoQualcosa = true;
+        for (const baia of baie) {
+            let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
+            if (!infoCutoff) {
+                assicuraTabInbound();
+                infoCutoff = leggiCutoffBaiaCorrente();
+            }
+            if (!infoCutoff) continue;
+            aggiungiAlGruppo(infoCutoff.cutoff, baia.doorNumber);
+        }
         if (!trovatoQualcosa) {
-            panelBody.innerHTML = '<div class="tnt-empty">Nessun orario di scarico in scadenza nelle baie.</div>';
+            panelBody.innerHTML = '<div class="tnt-empty">Nessun camion/baia trovato</div>';
             return;
         }
-
-        const listaGruppi = Array.from(gruppi.values());
-        listaGruppi.sort((a, b) => a.diffMinuti - b.diffMinuti);
-
-        listaGruppi.forEach((g) => {
-            const minMancanti = Math.round(g.diffMinuti);
-            let classeCard = "tnt-card-verde";
-            let testoBadge = "";
-
-            if (minMancanti < 0) {
-                classeCard = "tnt-card-rosso";
-                const rit = Math.abs(minMancanti);
-                const oreRit = Math.floor(rit / 60);
-                const minRit = rit % 60;
-                testoBadge = `In ritardo di ${oreRit > 0 ? oreRit + 'h ' : ''}${minRit}m`;
-            } else if (minMancanti <= 30) {
-                classeCard = "tnt-card-rosso";
-                testoBadge = `${minMancanti} min`;
-            } else if (minMancanti <= 60) {
-                classeCard = "tnt-card-ambra";
-                testoBadge = `${minMancanti} min`;
-            } else {
-                const ore = Math.floor(minMancanti / 60);
-                const min = minMancanti % 60;
-                testoBadge = ore > 0 ? `${ore}h ${min}m` : `${min}m`;
-            }
-
-            const card = document.createElement("div");
-            card.className = `tnt-card ${classeCard}`;
-            card.innerHTML = `
-                <div class="tnt-card-row">
-                    <span class="tnt-card-title">${g.nomeCategoria} (${g.orarioStr})</span>
-                    <span class="tnt-badge">${testoBadge}</span>
-                </div>
-                <div class="tnt-card-sub">Baie: ${g.baie.join(", ")}</div>
-            `;
-            panelBody.appendChild(card);
-        });
+        renderPannelloScaricoConteggi(panelBody, gruppi);
     }
 
-    function scansionaOutboundCarico(panelBody) {
-        const lista = leggiOutboundInScadenza();
-        if (lista.length === 0) {
-            panelBody.innerHTML = '<div class="tnt-empty">Nessun orario di carico in scadenza (<= 60 min).</div>';
+    function renderPannelloScaricoConteggi(panelBody, gruppi) {
+        if (gruppi.size === 0) {
+            panelBody.innerHTML = '<div class="tnt-empty">Nessuno scarico in scadenza</div>';
             return;
         }
-
-        lista.forEach((item) => {
-            let classeCard = "tnt-card-verde";
-            let testoBadge = "";
-
-            if (item.minutiMancanti < 0) {
-                classeCard = "tnt-card-rosso";
-                testoBadge = `In ritardo di ${Math.abs(item.minutiMancanti)}m`;
-            } else if (item.minutiMancanti <= 15) {
-                classeCard = "tnt-card-rosso";
-                testoBadge = `${item.minutiMancanti} min`;
-            } else if (item.minutiMancanti <= 30) {
-                classeCard = "tnt-card-ambra";
-                testoBadge = `${item.minutiMancanti} min`;
-            } else {
-                testoBadge = `${item.minutiMancanti} min`;
-            }
-
-            const card = document.createElement("div");
-            card.className = `tnt-card ${classeCard}`;
-            card.innerHTML = `
-                <div class="tnt-card-row">
-                    <span class="tnt-card-title">${item.destinazione} - ${item.nomeEsteso}</span>
-                    <span class="tnt-badge">${testoBadge}</span>
-                </div>
-                <div class="tnt-card-sub">Orario previsto: ${item.orarioStr}</div>
-            `;
-            panelBody.appendChild(card);
+        const ora = new Date();
+        const voci = [...gruppi.entries()].sort((a, b) => a[1].orario.getTime() - b[1].orario.getTime());
+        const fasce = [
+            { chiave: "ritardo", etichetta: "In ritardo", classe: "tnt-card-rosso", test: (m) => m < 0 },
+            { chiave: "30", etichetta: "Entro 30 min", classe: "tnt-card-rosso", test: (m) => m <= 30 },
+            { chiave: "60", etichetta: "Entro 60 min", classe: "tnt-card-ambra", test: (m) => m <= 60 },
+            { chiave: "oltre", etichetta: "Successivi", classe: "tnt-card-ambra", test: () => true }
+        ];
+        const bucket = new Map();
+        voci.forEach(([chiave, info]) => {
+            const diffMinuti = (info.orario.getTime() - ora.getTime()) / 60000;
+            const fascia = fasce.find((f) => f.test(diffMinuti));
+            if (!bucket.has(fascia.chiave)) bucket.set(fascia.chiave, { fascia, voci: [] });
+            bucket.get(fascia.chiave).voci.push(info);
         });
-    }
-
-    function creaMenuAffiancato(idBtn, testoBtn, larghezzaPannello, popolaCallback, haPallino = false) {
-        const container = document.createElement("li");
-        container.style.cssText = "position:relative; display:inline-block;";
-
-        const btn = document.createElement("a");
-        btn.id = idBtn;
-        btn.href = "javascript:void(0);";
-
-        let dotSpan = null;
-        if (haPallino) {
-            dotSpan = document.createElement("span");
-            dotSpan.style.display = "none";
-            btn.appendChild(dotSpan);
+        let html = "";
+        let presenteAsterisco = false;
+        fasce.forEach((f) => {
+            const gruppo = bucket.get(f.chiave);
+            if (!gruppo || gruppo.voci.length === 0) return;
+            html += '<div class="tnt-group-label">' + f.etichetta + '</div>';
+            gruppo.voci.forEach((info) => {
+                const hh = String(info.orario.getHours()).padStart(2, "0");
+                const mm = String(info.orario.getMinutes()).padStart(2, "0");
+                const listaBaie = info.baie.filter(Boolean).join(", ");
+                if (listaBaie.indexOf("*") !== -1) presenteAsterisco = true;
+                html += '<div class="tnt-card ' + f.classe + '">'
+                    + '<div class="tnt-card-row">'
+                    + '<span class="tnt-card-title">' + info.nome + ' (' + info.baie.length + ')</span>'
+                    + '<span class="tnt-badge">' + hh + ':' + mm + '</span>'
+                    + '</div>'
+                    + '<div class="tnt-card-sub">Baie: ' + listaBaie + '</div>'
+                    + '</div>';
+            });
+        });
+        if (presenteAsterisco) {
+            html += '<div class="tnt-footnote">* slittato al cutoff successivo per late arrival (meno di 150min di lavorazione disponibili)</div>';
         }
-
-        const labelText = document.createTextNode(testoBtn);
-        btn.appendChild(labelText);
-
-        const panel = document.createElement("div");
-        panel.className = "tnt-panel";
-        panel.style.width = larghezzaPannello;
-
-        panel.innerHTML = `
-            <div class="tnt-panel-header">
-                <div class="tnt-panel-title">${testoBtn}</div>
-                <div class="tnt-panel-close">&times;</div>
-            </div>
-            <div class="tnt-panel-body"></div>
-        `;
-
-        container.appendChild(btn);
-        document.body.appendChild(panel);
-
-        const panelBody = panel.querySelector(".tnt-panel-body");
-        const panelClose = panel.querySelector(".tnt-panel-close");
-
-        function posizionaPannello() {
-            const rect = btn.getBoundingClientRect();
-            panel.style.top = rect.bottom + 4 + "px";
-            panel.style.left = rect.left + "px";
-            panel.style.maxHeight = `calc(100vh - ${rect.bottom + 20}px)`;
-        }
-
-        function apri() {
-            document.querySelectorAll(".tnt-panel").forEach((p) => { if (p !== panel) p.style.display = "none"; });
-            posizionaPannello();
-            panel.style.display = "flex";
-            popolaCallback(panelBody);
-        }
-
-        function chiudi() { panel.style.display = "none"; }
-
-        btn.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (panel.style.display === "flex") chiudi(); else apri();
-        });
-
-        panelClose.addEventListener("click", (e) => { e.stopPropagation(); chiudi(); });
-        panel.addEventListener("click", (e) => { e.stopPropagation(); });
-
-        document.addEventListener("click", (e) => {
-            if (panel.style.display === "flex" && !panel.contains(e.target) && e.target !== btn) chiudi();
-        });
-
-        window.addEventListener("resize", () => {
-            if (panel.style.display === "flex") posizionaPannello();
-        });
-
-        return { container, dotSpan, panel, panelBody };
-    }
-
-    function creaMenuReport(idBtn, testoBtn, larghezzaPannello) {
-        const container = document.createElement("li");
-        container.style.cssText = "position:relative; display:inline-block;";
-
-        const btn = document.createElement("a");
-        btn.id = idBtn;
-        btn.href = "javascript:void(0);";
-        btn.textContent = testoBtn;
-
-        const panel = document.createElement("div");
-        panel.className = "tnt-panel";
-        panel.style.width = larghezzaPannello;
-
-        const oggiStr = new Date().toISOString().split("T")[0];
-
-        panel.innerHTML = `
-            <div class="tnt-panel-header">
-                <div class="tnt-panel-title">${testoBtn}</div>
-                <div class="tnt-panel-close">&times;</div>
-            </div>
-            <div class="tnt-panel-body">
-                <label>Data Inizio:</label>
-                <input type="date" id="tnt_report_inizio" value="${oggiStr}">
-                <label>Data Fine:</label>
-                <input type="date" id="tnt_report_fine" value="${oggiStr}">
-                <button id="tnt_btn_scarica_filtrato" class="tnt-btn-primary">Scarica CSV (Selezionato)</button>
-                <button id="tnt_btn_scarica_tutto" class="tnt-btn-secondary">Scarica CSV (Tutto lo storico)</button>
-                <div class="tnt-footnote">* Si consiglia di esportare il report ogni giorno prima delle 00:00 per garantire la completezza dei dati registrati durante il turno. I dati registrati vengono comunque conservati per 3 giorni e ripuliti automaticamente.</div>
-            </div>
-        `;
-
-        container.appendChild(btn);
-        document.body.appendChild(panel);
-
-        const panelClose = panel.querySelector(".tnt-panel-close");
-
-        function posizionaPannello() {
-            const rect = btn.getBoundingClientRect();
-            panel.style.top = rect.bottom + 4 + "px";
-            panel.style.left = rect.left + "px";
-        }
-
-        function apri() {
-            document.querySelectorAll(".tnt-panel").forEach((p) => { if (p !== panel) p.style.display = "none"; });
-            posizionaPannello();
-            panel.style.display = "flex";
-        }
-
-        function chiudi() { panel.style.display = "none"; }
-
-        btn.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (panel.style.display === "flex") chiudi(); else apri();
-        });
-
-        panelClose.addEventListener("click", (e) => { e.stopPropagation(); chiudi(); });
-        panel.addEventListener("click", (e) => { e.stopPropagation(); });
-
-        document.addEventListener("click", (e) => {
-            if (panel.style.display === "flex" && !panel.contains(e.target) && e.target !== btn) chiudi();
-        });
-
-        panel.querySelector("#tnt_btn_scarica_filtrato").addEventListener("click", () => {
-            const ini = panel.querySelector("#tnt_report_inizio").value;
-            const fin = panel.querySelector("#tnt_report_fine").value;
-            esportaReportCSV(ini, fin);
-            chiudi();
-        });
-
-        panel.querySelector("#tnt_btn_scarica_tutto").addEventListener("click", () => {
-            esportaReportCSV(null, null);
-            chiudi();
-        });
-
-        return container;
-    }
-
-    let menuScarico = null;
-    let menuCarico = null;
-    let menuReportObj = null;
-
-    function initMenuHeader() {
-        if (document.getElementById("tnt_menu_scarico")) return;
-        const ul = document.querySelector(".navbar-nav, .nav.navbar-nav, header ul");
-        if (!ul) return;
-
-        menuScarico = creaMenuAffiancato("tnt_menu_scarico", "Scarico", "320px", (body) => {
-            body.innerHTML = "";
-            scansionaBaieScarico(body);
-        });
-
-        menuCarico = creaMenuAffiancato("tnt_menu_carico", "Carico", "320px", (body) => {
-            body.innerHTML = "";
-            scansionaOutboundCarico(body);
-        }, true);
-
-        menuReportObj = creaMenuReport("tnt_menu_report", "Report CSV", "280px");
-
-        ul.appendChild(menuScarico.container);
-        ul.appendChild(menuCarico.container);
-        ul.appendChild(menuReportObj);
+        panelBody.innerHTML = html;
     }
 
     function aggiornaPannelloOutbound() {
-        if (!menuCarico || !menuCarico.dotSpan) return;
-        const lista = leggiOutboundInScadenza();
-        const minImminente = lista.length > 0 ? lista[0].minutiMancanti : 999;
+        const body = document.getElementById("tnt-orologio-panel-body");
+        const panel = document.getElementById("tnt-orologio-panel");
+        if (!body || !panel || panel.style.display === "none") return;
+        const risultati = leggiOutboundInScadenza();
+        const ordineCategorie = ["Carico", "Parcheggio", "Freight"];
+        const gruppi = { "Carico": [], "Parcheggio": [], "Freight": [] };
+        risultati.forEach((r) => { if(gruppi[r.categoria]) gruppi[r.categoria].push(r); });
+        let html = "";
+        ordineCategorie.forEach((cat) => {
+            const lista = gruppi[cat];
+            if (!lista || lista.length === 0) return;
+            html += '<div class="tnt-group-label">' + cat + ' (' + lista.length + ')</div>';
+            html += lista.map((r) => {
+                const minutiTesto = r.diffMinuti >= 0 ? Math.round(r.diffMinuti) + " min" : "In ritardo";
+                const classeCard = r.diffMinuti <= 30 ? "tnt-card-rosso" : "tnt-card-ambra";
+                return '<div class="tnt-card ' + classeCard + '">'
+                    + '<div class="tnt-card-row">'
+                    + '<span class="tnt-card-title">' + r.door + (r.destinazione ? " · " + r.destinazione : "") + '</span>'
+                    + '<span class="tnt-badge">' + minutiTesto + '</span>'
+                    + '</div>'
+                    + '</div>';
+            }).join("");
+        });
+        body.innerHTML = html || '<div class="tnt-empty">Nessuna baia in scadenza</div>';
+    }
 
-        if (minImminente <= 15) {
-            menuCarico.dotSpan.className = "tnt-dot-rosso";
-            menuCarico.dotSpan.style.display = "inline-block";
-        } else if (minImminente <= 30) {
-            menuCarico.dotSpan.className = "tnt-dot-giallo";
-            menuCarico.dotSpan.style.display = "inline-block";
-        } else {
-            menuCarico.dotSpan.style.display = "none";
-        }
+    function creaIconaMenu(id, coloreCerchio, disegnoSvg) {
+        const iconaSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 46" width="46" height="46"><rect x="0" y="0" width="46" height="46" rx="10" fill="#47484a"/>' + disegnoSvg + '</svg>';
+        const btn = document.createElement("img");
+        btn.id = id;
+        btn.className = "cc-menu-button";
+        btn.src = "data:image/svg+xml;base64," + btoa(iconaSvg);
+        btn.style.cssText = "display:block;width:46px;height:46px;margin:16px 13px 0;cursor:pointer;user-select:none;";
+        return btn;
+    }
 
-        if (menuCarico.panel.style.display === "flex") {
-            menuCarico.panelBody.innerHTML = "";
-            scansionaOutboundCarico(menuCarico.panelBody);
-        }
+    function creaPannello(id, titolo, coloreIcona) {
+        const panel = document.createElement("div");
+        panel.id = id;
+        panel.className = "tnt-panel";
+        panel.style.width = "320px";
+        panel.innerHTML =
+            '<div class="tnt-panel-header">' +
+                '<div class="tnt-panel-title"><span class="tnt-dot-titolo" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + coloreIcona + ';"></span>' + titolo + '</div>' +
+                '<span class="tnt-panel-close" title="Chiudi">&#10005;</span>' +
+            '</div>' +
+            '<div class="tnt-panel-body" id="' + id + '-body"></div>';
+        document.body.appendChild(panel);
+        panel.querySelector(".tnt-panel-close").addEventListener("click", (e) => {
+            e.stopPropagation();
+            panel.style.display = "none";
+            if (ORDINE_GRUPPO_CARICO_SCARICO.indexOf(panel.id) !== -1) {
+                posizionaPannelliGruppo(ORDINE_GRUPPO_CARICO_SCARICO);
+            }
+        });
+        return panel;
+    }
 
-        if (menuScarico && menuScarico.panel.style.display === "flex") {
-            menuScarico.panelBody.innerHTML = "";
-            scansionaBaieScarico(menuScarico.panelBody);
-        }
+    function chiudiTuttiIPannelli() {
+        document.querySelectorAll(".tnt-panel").forEach((p) => { p.style.display = "none"; });
+    }
+
+    function chiudiPannelliEsclusi(idsDaMantenere) {
+        document.querySelectorAll(".tnt-panel").forEach((p) => {
+            if (idsDaMantenere.indexOf(p.id) !== -1) return;
+            p.style.display = "none";
+        });
+    }
+
+    function pannelloAperto(panel) {
+        return !!panel && panel.style.display !== "none" && panel.style.display !== "";
+    }
+
+    const ORDINE_GRUPPO_CARICO_SCARICO = ["tnt-orologio-panel", "tnt-orologio-scarico-panel"];
+
+    function posizionaPannelliGruppo(ordineIds) {
+        const menu = document.querySelector(".cc-hub-menu-panel");
+        if (!menu) return;
+        const rectMenu = menu.getBoundingClientRect();
+        const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
+        let leftCorrente = rectMenu.right;
+        ordineIds.forEach((id) => {
+            const p = document.getElementById(id);
+            if (!pannelloAperto(p)) return;
+            p.style.top = rectMenu.top + "px";
+            p.style.left = leftCorrente + "px";
+            p.style.height = Math.max(altezzaDisponibile, 200) + "px";
+            leftCorrente += p.getBoundingClientRect().width;
+        });
+    }
+
+    function posizionaPannelloSingolo(panel, btn) {
+        const menu = document.querySelector(".cc-hub-menu-panel");
+        const rectMenu = menu ? menu.getBoundingClientRect() : btn.getBoundingClientRect();
+        const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
+        panel.style.top = rectMenu.top + "px";
+        panel.style.left = rectMenu.right + "px";
+        panel.style.height = Math.max(altezzaDisponibile, 200) + "px";
+    }
+
+    function collegaClick(btn, panel, callbackAggiorna, gruppoIds) {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const eraAperto = pannelloAperto(panel);
+            if (gruppoIds) {
+                chiudiPannelliEsclusi(gruppoIds);
+                panel.style.display = eraAperto ? "none" : "flex";
+                posizionaPannelliGruppo(gruppoIds);
+                if (!eraAperto) callbackAggiorna();
+                return;
+            }
+            chiudiTuttiIPannelli();
+            if (eraAperto) return;
+            panel.style.display = "flex";
+            posizionaPannelloSingolo(panel, btn);
+            callbackAggiorna();
+        });
+        panel.addEventListener("click", (e) => e.stopPropagation());
     }
 
     function initIcone() {
-        initMenuHeader();
+        const menu = document.querySelector(".cc-hub-menu-panel");
+        if (!menu) return;
+
+        let panelOrologio = document.getElementById("tnt-orologio-panel");
+        if (!document.getElementById("tnt-orologio-btn")) {
+            const disegnoOrologio = '<circle cx="23" cy="23" r="13" fill="none" stroke="#ffffff" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>';
+            const btn = creaIconaMenu("tnt-orologio-btn", "#ffffff", disegnoOrologio);
+            btn.title = "Unit Ready in scadenza (Outbound)";
+            menu.appendChild(btn);
+            panelOrologio = creaPannello("tnt-orologio-panel", "Carico - unit ready in scadenza", "#ffffff");
+            collegaClick(btn, panelOrologio, aggiornaPannelloOutbound, ORDINE_GRUPPO_CARICO_SCARICO);
+        }
+
+        if (!document.getElementById("tnt-orologio-scarico-btn")) {
+            const disegnoScarico = '<circle cx="23" cy="23" r="13" fill="none" stroke="#ffcc00" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="#ffcc00" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="#ffcc00" stroke-width="2" stroke-linecap="round"/>';
+            const btn2 = creaIconaMenu("tnt-orologio-scarico-btn", "#ffcc00", disegnoScarico);
+            btn2.title = "Carichi in scadenza cutoff (Scarico)";
+            menu.appendChild(btn2);
+            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", "#ffcc00");
+            const body2 = document.getElementById("tnt-orologio-scarico-panel-body");
+            collegaClick(btn2, panel2, () => scansionaBaieScarico(body2), ORDINE_GRUPPO_CARICO_SCARICO);
+        }
+
+        if (!document.getElementById("tnt-btn-scarica-report")) {
+            const disegnoReport = '<rect x="15" y="13" width="16" height="20" rx="2" fill="none" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="18" x2="27" y2="18" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="23" x2="27" y2="23" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="28" x2="24" y2="28" stroke="#FF7A00" stroke-width="2"/>';
+            const btnReport = creaIconaMenu("tnt-btn-scarica-report", "#FF7A00", disegnoReport);
+            btnReport.title = "Scarica Report Turno CSV";
+
+            const panelReport = creaPannello("tnt-report-panel", "Esporta report turno", "#FF7A00");
+            const bodyReport = document.getElementById("tnt-report-panel-body");
+            collegaClick(btnReport, panelReport, () => renderPannelloReport(bodyReport));
+            menu.appendChild(btnReport);
+        }
     }
 
-    function aggiornaTracciamentoArrivi() {
-        monitoraBaiaSelezionata();
-    }
+    document.addEventListener("click", (e) => {
+        if (e.target.closest(".tnt-panel") || e.target.closest(".cc-menu-button")) return;
+        chiudiPannelliEsclusi(ORDINE_GRUPPO_CARICO_SCARICO);
+    });
+
+    window.addEventListener("resize", () => {
+        posizionaPannelliGruppo(ORDINE_GRUPPO_CARICO_SCARICO);
+    });
+
+    document.addEventListener("click", (e) => {
+        const wrapper = e.target.closest('[id^="unit_"]');
+        if (!wrapper) return;
+        const numEl = wrapper.querySelector(DOOR_NUM_SELECTOR_SCARICO);
+        if (!numEl) return;
+        const span = numEl.querySelector("span");
+        if (!span) return;
+        const doorNumber = span.textContent.trim();
+        if (doorNumber) baiaSelezionata = doorNumber;
+    }, true);
 
     try { scanBlocchi(document.body); } catch (e) {}
+    try { pulisciStoricoVecchio(); } catch (e) {}
     try { initIcone(); } catch (e) {}
     try { aggiornaTracciamentoArrivi(); } catch (e) {}
     try { processaTripDetails(); } catch (e) {}
@@ -1130,11 +1124,9 @@
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(eseguiControlliPesanti, 600);
     });
-    observer.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class"] });
 
-    setInterval(() => {
-        try { aggiornaPannelloOutbound(); } catch (e) {}
-        try { processaTripDetails(); } catch (e) {}
-    }, 15000);
-
+    setInterval(aggiornaTracciamentoArrivi, 5000);
+    setInterval(aggiornaPannelloOutbound, 15000);
+    setInterval(pulisciStoricoVecchio, 60 * 60 * 1000);
 })();
