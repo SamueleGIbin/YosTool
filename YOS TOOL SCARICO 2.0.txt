@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.7
+// @version      1.7
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -115,7 +115,7 @@
                 }
                 arrivi[doorNumber] = { unitId: unitId, orario: orario };
                 modificato = true;
-                
+
                 registraInStoricoReport(doorNumber, unitId, orario);
             }
         });
@@ -123,7 +123,7 @@
     }
 
     const codeMap = {
-        "BRG": "BERGAMO", "BCN": "BARCELLONA", "GOA": "GENOVA", "ZD1": "ZIBIDO",
+        "BRG": "BERGAMO", "BCN": "BARCELLONA", "GOA": "GENOVA", "ZD1": "ZIBIDO", "XXJ": "FRANCIA",
         "LUG": "LUGANO", "REM": "REGGIO EMILIA", "MAD": "MADRID", "HNJ": "HANNOVER",
         "OS3": "ORBASSANO", "OSO": "SONDRIO", "TO1": "TORINO", "MRS": "MARSIGLIA",
         "TV1": "TREVISO", "QPA": "PADOVA", "PD2": "PADOVA", "FIA": "FIANO",
@@ -144,7 +144,7 @@
     };
 
     const CATEGORIE = [
-        { nome: "Import di Prima", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 30, codici: ["DNG", "QAR", "XWT", "MAD", "WA1", "BZQ", "MV9", "BCN", "DFT", "MXP"] },
+        { nome: "Import di Prima", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 30, codici: ["DNG", "QAR", "XWT", "MAD", "WA1", "BZQ", "MV9", "BCN", "DFT", "MXP", "XXJ"] },
         { nome: "Clienti Domestic", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 45, codici: ["AOS1", "ESSENZ", "SATCI", "GAMESTOP", "AT21", "CEMB", "RUBI", "PJLO", "COWA", "HILT", "INCO", "PENT", "LIVA", "RUNN", "PNT1", "TRAS", "COVD"] },
         { nome: "Filiali per Sud", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 45, codici: ["ISV", "IOE", "PRG"] },
         { nome: "Import Prima Downgradato", turno: "Primo Shift", cutoffOre: 23, cutoffMin: 45, codici: ["HNJ", "DNG*", "DFT*", "BCN", "ECL", "LUG"] },
@@ -152,13 +152,13 @@
         { nome: "Filiali per Export", turno: "Secondo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["VBS", "MM1", "VE1", "IBD", "REM", "BO1", "QPA", "VRN", "MDA", "PMF", "IIM"] },
         { nome: "Clienti International", turno: "Primo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["LIVA", "GEWI", "MASE", "APLE", "UFAL", "GDEC"] },
         { nome: "Filiali Divisione per 07", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["BRG", "IPO", "MZ1", "IBU", "TO1", "MM1", "VRN", "VNZ", "TV1", "VE1"] },
-        { nome: "Import Secunda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH", "KCW"] },
+        { nome: "Import Seconda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH", "KCW"] },
         { nome: "Hub 07 Nord", turno: "Secondo Shift", cutoffOre: 5, cutoffMin: 30, codici: ["BO2", "PD2", "FC5", "PSA", "ZRO"] },
         { nome: "Hub Export/Sud", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["AN6", "FIA", "NC3", "NT3", "GDEC", "COFR", "UFAL", "APLE"] },
         { nome: "Import Anticipi", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["LYS", "MRS", "NT3", "BA5"] }
     ];
-    const SOGLIA_OUTBOUND_MINUTI = 300;
-    const SOGLIA_SCARICO_MINUTI = 300;
+    const SOGLIA_OUTBOUND_MINUTI = 60;
+    const SOGLIA_SCARICO_MINUTI = 500;
 
     function categoriaBaia(door) {
         if (/^P/i.test(door)) return "Parcheggio";
@@ -271,26 +271,26 @@
         ".tnt-panel{position:fixed;display:none;flex-direction:column;background:#1c1c1e;border-left:1px solid #333;box-shadow:-6px 0 18px rgba(0,0,0,0.45);z-index:99999;font-family:Roboto,sans-serif;color:#f2f2f2;}",
         ".tnt-panel-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #2c2c2e;flex:0 0 auto;}",
         ".tnt-panel-title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;color:#f2f2f2;}",
-        ".tnt-panel-close{cursor:pointer;color:#8a8a8e;font-size:18px;line-height:1;padding:2px 6px;border-radius:4px;}",
-        ".tnt-panel-close:hover{background:#2c2c2e;color:#f2f2f2;}",
+        ".tnt-panel-close{cursor:pointer;color:#c7c7cc;font-size:18px;line-height:1;padding:2px 6px;border-radius:4px;}",
+        ".tnt-panel-close:hover{background:#2c2c2e;color:#ffffff;}",
         ".tnt-panel-body{flex:1 1 auto;overflow-y:auto;padding:10px;}",
-        ".tnt-group-label{color:#8a8a8e;font-size:11px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;padding:10px 6px 6px;}",
+        ".tnt-group-label{color:#c7c7cc;font-size:11px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;padding:10px 6px 6px;}",
         ".tnt-group-label:first-child{padding-top:2px;}",
-        ".tnt-card{background:#242426;border-left:3px solid #555;border-radius:0 8px 8px 0;padding:9px 12px;margin-bottom:6px;}",
+        ".tnt-card{background:#2e2e31;border-left:3px solid #777;border-radius:0 8px 8px 0;padding:9px 12px;margin-bottom:6px;}",
         ".tnt-card-row{display:flex;align-items:center;justify-content:space-between;gap:8px;}",
-        ".tnt-card-title{color:#f2f2f2;font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
-        ".tnt-card-sub{color:#8a8a8e;font-size:11px;margin-top:4px;line-height:1.4;}",
+        ".tnt-card-title{color:#ffffff;font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+        ".tnt-card-sub{color:#d5d5da;font-size:11px;margin-top:4px;line-height:1.4;}",
         ".tnt-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;flex-shrink:0;}",
         ".tnt-card-rosso{border-left-color:#E24B4A;}",
-        ".tnt-card-rosso .tnt-badge{background:#501313;color:#F7C1C1;}",
+        ".tnt-card-rosso .tnt-badge{background:#5c1717;color:#FFD5D5;}",
         ".tnt-card-ambra{border-left-color:#FAC775;}",
-        ".tnt-card-ambra .tnt-badge{background:#412402;color:#FAC775;}",
+        ".tnt-card-ambra .tnt-badge{background:#4d2c04;color:#FFE1AD;}",
         ".tnt-card-verde{border-left-color:#5DCAA5;}",
-        ".tnt-card-verde .tnt-badge{background:#04342C;color:#9FE1CB;}",
-        ".tnt-empty{padding:16px 8px;opacity:0.6;font-family:Roboto,sans-serif;color:#c9c9cc;font-size:13px;text-align:center;}",
-        ".tnt-footnote{padding:10px 6px 4px;font-size:10px;color:#E24B4A;font-family:Roboto,sans-serif;}",
-        ".tnt-panel-body label{display:block;font-size:12px;margin-bottom:3px;color:#8a8a8e;}",
-        ".tnt-panel-body input[type=date]{width:100%;margin-bottom:12px;padding:7px 8px;border-radius:6px;border:1px solid #333;background:#242426;color:#f2f2f2;box-sizing:border-box;}",
+        ".tnt-card-verde .tnt-badge{background:#043d33;color:#BFF3DF;}",
+        ".tnt-empty{padding:16px 8px;opacity:0.85;font-family:Roboto,sans-serif;color:#e2e2e5;font-size:13px;text-align:center;}",
+        ".tnt-footnote{padding:10px 6px 4px;font-size:10px;color:#FF8B8A;font-family:Roboto,sans-serif;}",
+        ".tnt-panel-body label{display:block;font-size:12px;margin-bottom:3px;color:#c7c7cc;}",
+        ".tnt-panel-body input[type=date]{width:100%;margin-bottom:12px;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;box-sizing:border-box;}",
         ".tnt-panel-body button{width:100%;padding:9px;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;margin-bottom:8px;border:none;}",
         ".tnt-btn-primary{background:#FF7A00;color:#1c1c1e;}",
         ".tnt-btn-secondary{background:#2c2c2e;color:#f2f2f2;border:1px solid #444 !important;}"
@@ -1040,21 +1040,71 @@
         document.querySelectorAll(".tnt-panel").forEach((p) => { p.style.display = "none"; });
     }
 
-    function collegaClick(btn, panel, callbackAggiorna) {
+    // Chiude tutti i pannelli TRANNE quelli il cui id e' incluso in idsDaMantenere.
+    // Usata dai pannelli "di gruppo" (Carico + Scarico) per non chiudersi a vicenda.
+    function chiudiPannelliEsclusi(idsDaMantenere) {
+        document.querySelectorAll(".tnt-panel").forEach((p) => {
+            if (idsDaMantenere.indexOf(p.id) !== -1) return;
+            p.style.display = "none";
+        });
+    }
+
+    function pannelloAperto(panel) {
+        return !!panel && panel.style.display !== "none" && panel.style.display !== "";
+    }
+
+    // Ordine fisso di affiancamento per i pannelli che possono stare aperti insieme:
+    // il primo aperto si aggancia alla colonna di icone, il secondo si affianca a destra
+    // del primo, cosi' non si sovrappongono mai.
+    const ORDINE_GRUPPO_CARICO_SCARICO = ["tnt-orologio-panel", "tnt-orologio-scarico-panel"];
+
+    function posizionaPannelliGruppo(ordineIds) {
+        const menu = document.querySelector(".cc-hub-menu-panel");
+        if (!menu) return;
+        const rectMenu = menu.getBoundingClientRect();
+        const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
+        let leftCorrente = rectMenu.right;
+        ordineIds.forEach((id) => {
+            const p = document.getElementById(id);
+            if (!pannelloAperto(p)) return;
+            p.style.top = rectMenu.top + "px";
+            p.style.left = leftCorrente + "px";
+            p.style.height = Math.max(altezzaDisponibile, 200) + "px";
+            leftCorrente += p.getBoundingClientRect().width;
+        });
+    }
+
+    // Posiziona un pannello "esclusivo" (es. Report) subito a destra della colonna icone,
+    // come comportamento originale: si apre da solo chiudendo tutti gli altri.
+    function posizionaPannelloSingolo(panel, btn) {
+        const menu = document.querySelector(".cc-hub-menu-panel");
+        const rectMenu = menu ? menu.getBoundingClientRect() : btn.getBoundingClientRect();
+        const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
+        panel.style.top = rectMenu.top + "px";
+        panel.style.left = rectMenu.right + "px";
+        panel.style.height = Math.max(altezzaDisponibile, 200) + "px";
+    }
+
+    // gruppoIds: se presente, il pannello appartiene a un gruppo di pannelli che possono
+    // restare aperti simultaneamente (es. Carico + Scarico). In quel caso, aprendolo si
+    // chiude solo cio' che NON fa parte del gruppo, e i pannelli del gruppo aperti vengono
+    // riaffiancati automaticamente. Se assente, il comportamento resta quello originale
+    // "esclusivo": aprendolo si chiude qualsiasi altro pannello.
+    function collegaClick(btn, panel, callbackAggiorna, gruppoIds) {
         btn.addEventListener("click", (e) => {
             e.stopPropagation();
-            const eraAperto = panel.style.display !== "none" && panel.style.display !== "";
+            const eraAperto = pannelloAperto(panel);
+            if (gruppoIds) {
+                chiudiPannelliEsclusi(gruppoIds);
+                panel.style.display = eraAperto ? "none" : "flex";
+                posizionaPannelliGruppo(gruppoIds);
+                if (!eraAperto) callbackAggiorna();
+                return;
+            }
             chiudiTuttiIPannelli();
             if (eraAperto) return;
-            // Il pannello si aggancia subito a destra della colonna di icone e ne eredita
-            // l'altezza, cosi' da coprire tutta la zona sottostante invece di fluttuare.
-            const menu = document.querySelector(".cc-hub-menu-panel");
-            const rectMenu = menu ? menu.getBoundingClientRect() : btn.getBoundingClientRect();
-            const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
-            panel.style.top = rectMenu.top + "px";
-            panel.style.left = rectMenu.right + "px";
-            panel.style.height = Math.max(altezzaDisponibile, 200) + "px";
             panel.style.display = "flex";
+            posizionaPannelloSingolo(panel, btn);
             callbackAggiorna();
         });
         panel.addEventListener("click", (e) => e.stopPropagation());
@@ -1063,7 +1113,7 @@
     function initIcone() {
         const menu = document.querySelector(".cc-hub-menu-panel");
         if (!menu) return;
-        
+
         let panelOrologio = document.getElementById("tnt-orologio-panel");
         if (!document.getElementById("tnt-orologio-btn")) {
             const disegnoOrologio = '<circle cx="23" cy="23" r="13" fill="none" stroke="#ffffff" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>';
@@ -1071,9 +1121,9 @@
             btn.title = "Unit Ready in scadenza (Outbound)";
             menu.appendChild(btn);
             panelOrologio = creaPannello("tnt-orologio-panel", "Carico - unit ready in scadenza", "#ffffff");
-            collegaClick(btn, panelOrologio, aggiornaPannelloOutbound);
+            collegaClick(btn, panelOrologio, aggiornaPannelloOutbound, ORDINE_GRUPPO_CARICO_SCARICO);
         }
-        
+
         if (!document.getElementById("tnt-orologio-scarico-btn")) {
             const disegnoScarico = '<circle cx="23" cy="23" r="13" fill="none" stroke="#ffcc00" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="#ffcc00" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="#ffcc00" stroke-width="2" stroke-linecap="round"/>';
             const btn2 = creaIconaMenu("tnt-orologio-scarico-btn", "#ffcc00", disegnoScarico);
@@ -1081,7 +1131,7 @@
             menu.appendChild(btn2);
             const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", "#ffcc00");
             const body2 = document.getElementById("tnt-orologio-scarico-panel-body");
-            collegaClick(btn2, panel2, () => scansionaBaieScarico(body2));
+            collegaClick(btn2, panel2, () => scansionaBaieScarico(body2), ORDINE_GRUPPO_CARICO_SCARICO);
         }
 
         // Inserimento del pulsante Report CSV direttamente dentro la barra laterale sotto il secondo orologio
@@ -1100,6 +1150,10 @@
     document.addEventListener("click", (e) => {
         if (e.target.closest(".tnt-panel") || e.target.closest(".cc-menu-button")) return;
         chiudiTuttiIPannelli();
+    });
+
+    window.addEventListener("resize", () => {
+        posizionaPannelliGruppo(ORDINE_GRUPPO_CARICO_SCARICO);
     });
 
     document.addEventListener("click", (e) => {
