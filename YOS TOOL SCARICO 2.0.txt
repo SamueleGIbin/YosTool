@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.8
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -12,7 +12,21 @@
 (function () {
     'use strict';
 
-    (function interceptaDockingDoors() {
+    function gestisciRispostaIntercettata(url, testoBody) {
+        const urlStr = String(url || "");
+        try {
+            if (urlStr.indexOf("dockingDoors") !== -1) {
+                elaboraRispostaDockingDoors(JSON.parse(testoBody));
+                return;
+            }
+        } catch (e) {}
+        try {
+            const dati = JSON.parse(testoBody);
+            if (sembraListaMovimenti(dati)) elaboreRispostaMovimenti(dati);
+        } catch (e) {}
+    }
+
+    (function interceptaXHR() {
         const origOpen = XMLHttpRequest.prototype.open;
         const origSend = XMLHttpRequest.prototype.send;
         XMLHttpRequest.prototype.open = function (method, url) {
@@ -21,22 +35,30 @@
         };
         XMLHttpRequest.prototype.send = function (body) {
             this.addEventListener("load", function () {
-                 try {
-                    if (this._tntUrl && String(this._tntUrl).indexOf("dockingDoors") !== -1) {
-                        elaboraRispostaDockingDoors(JSON.parse(this.responseText));
-                        return;
-                    }
-                } catch (e) {}
-                try {
-                    const dati = JSON.parse(this.responseText);
-                    if (sembraListaMovimenti(dati)) elaboreRispostaMovimenti(dati);
-                } catch (e) {}
+                try { gestisciRispostaIntercettata(this._tntUrl, this.responseText); } catch (e) {}
             });
             return origSend.apply(this, arguments);
         };
     })();
 
+    (function interceptaFetch() {
+        if (typeof window.fetch !== "function") return;
+        const origFetch = window.fetch;
+        window.fetch = function (input, init) {
+            const url = typeof input === "string" ? input : (input && input.url) || "";
+            return origFetch.apply(this, arguments).then((response) => {
+                try {
+                    response.clone().text().then((testo) => {
+                        try { gestisciRispostaIntercettata(url, testo); } catch (e) {}
+                    }).catch(() => {});
+                } catch (e) {}
+                return response;
+            });
+        };
+    })();
+
     const cacheMovimentiPerUnit = new Map();
+    const cacheCutoffPerBaia = new Map();
 
     function sembraListaMovimenti(dati) {
         return Array.isArray(dati) && dati.length > 0 && dati[0] && typeof dati[0] === "object"
@@ -92,12 +114,14 @@
             if (porta.status !== "OCCUPIED" || !unit) {
                 if (arrivi[doorNumber]) {
                     delete arrivi[doorNumber];
+                    cacheCutoffPerBaia.delete(doorNumber);
                     modificato = true;
                 }
                 return;
             }
             const unitId = unit.unitId;
             const esistente = arrivi[doorNumber];
+            if (!esistente || esistente.unitId !== unitId) cacheCutoffPerBaia.delete(doorNumber);
             if (!esistente || esistente.unitId !== unitId || unit.currentAction === "START_UNLOADING") {
                 let orario;
                 if (unit.currentAction === "START_UNLOADING" && (unit.updatedDateTimestamp || unit.updatedDate)) {
@@ -393,6 +417,7 @@
                     }
                 }
                 aggiornaRigaArrivoECountdown(contenitore, risultato);
+                if (risultato && baiaSelezionata) cacheCutoffPerBaia.set(baiaSelezionata, risultato);
                 if (!origineEl || !arrivoEl) return;
                 const chiave = codiceOrigine + "|" + testoArrivo + "|" + testoActualArrivo + "|" + testoArrivoPorta;
                 if (sezione.getAttribute("data-tnt-turno-key") === chiave) return;
@@ -857,8 +882,13 @@
         for (const baia of baie) {
             let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
             if (!infoCutoff) {
+                const cutoffCachato = cacheCutoffPerBaia.get(baia.doorNumber);
+                if (cutoffCachato) infoCutoff = { cutoff: cutoffCachato, codice: null };
+            }
+            if (!infoCutoff && baiaSelezionata === baia.doorNumber) {
                 assicuraTabInbound();
                 infoCutoff = leggiCutoffBaiaCorrente();
+                if (infoCutoff) cacheCutoffPerBaia.set(baia.doorNumber, infoCutoff.cutoff);
             }
             if (!infoCutoff) continue;
             aggiungiAlGruppo(infoCutoff.cutoff, baia.doorNumber);
