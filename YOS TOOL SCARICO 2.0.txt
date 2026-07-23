@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      2.0
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -121,8 +121,8 @@
             }
             const unitId = unit.unitId;
             const esistente = arrivi[doorNumber];
-            if (!esistente || esistente.unitId !== unitId) cacheCutoffPerBaia.delete(doorNumber);
-            if (!esistente || esistente.unitId !== unitId || unit.currentAction === "START_UNLOADING") {
+            const cambiaUnit = !esistente || esistente.unitId !== unitId;
+            if (cambiaUnit || unit.currentAction === "START_UNLOADING") {
                 let orario;
                 if (unit.currentAction === "START_UNLOADING" && (unit.updatedDateTimestamp || unit.updatedDate)) {
                     orario = unit.updatedDateTimestamp || unit.updatedDate;
@@ -131,11 +131,24 @@
                 } else {
                     orario = new Date().toISOString();
                 }
+                // L'orario reale di arrivo alla baia (voce.orario) è l'input che decide se un
+                // camion slitta al cutoff successivo per "late arrival". Se questo orario non
+                // era ancora noto la prima volta che è stato calcolato il cutoff (es. Trip
+                // Details aperto appena il camion è comparso, prima dello START_UNLOADING),
+                // il risultato "non in ritardo" restava in cache per sempre: il pannello
+                // laterale non veniva più aggiornato anche quando il camion diventava
+                // realmente in ritardo. Invalidiamo la cache ogni volta che l'orario cambia,
+                // non solo quando cambia il mezzo.
+                const orarioCambiato = !esistente || esistente.orario !== orario;
+                if (cambiaUnit || orarioCambiato) {
+                    cacheCutoffPerBaia.delete(doorNumber);
+                    unitVerificatiCutoff.delete(String(unitId));
+                }
                 arrivi[doorNumber] = { unitId: unitId, orario: orario };
                 modificato = true;
 
-                registraInStoricoReport(doorNumber, unitId, orario);
-                if (categoriaBaia(doorNumber) === "Scarico") accodaVerificaBaia(doorNumber, unitId);
+                if (cambiaUnit) registraInStoricoReport(doorNumber, unitId, orario);
+                if (categoriaBaia(doorNumber) === "Scarico" && (cambiaUnit || orarioCambiato)) accodaVerificaBaia(doorNumber, unitId);
             }
         });
         if (modificato) salvaArriviBaia(arrivi);
@@ -889,7 +902,15 @@
             const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
             if (diffMinuti > SOGLIA_SCARICO_MINUTI) return;
             const senzaBaiaAssegnata = /^\(.*\)$/.test(infoBaia);
-            if (senzaBaiaAssegnata && diffMinuti < 150) return;
+            // Un camion senza baia assegnata e senza orario di arrivo reale (arrivoPortaReale
+            // sconosciuto) non può MAI essere marcato "in ritardo" da calcolaCutoffPerCodice
+            // (quel calcolo richiede l'orario reale), quindi resta sul suo cutoff base/originale
+            // (es. 21:30 Import di Prima). Va bene così: quando non sappiamo se è in ritardo,
+            // non dobbiamo presumerlo e farlo sparire. Il filtro sotto va quindi applicato solo
+            // per nascondere rumore di camion ancora lontani (>150min, non urgenti); non deve
+            // MAI nascondere un camion già scaduto/vicino al cutoff (diffMinuti < 150 incluso
+            // negativo = già in ritardo), perché è esattamente il caso più critico da mostrare.
+            if (senzaBaiaAssegnata && diffMinuti < 150 && diffMinuti >= 0) return;
             const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
             const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
             const chiave = risultato.cat.nome + "|" + hh + ":" + mm;
