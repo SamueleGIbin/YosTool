@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      2.0
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -12,8 +12,13 @@
 (function () {
     'use strict';
 
+    function urlDiInteresse(urlStr) {
+        return urlStr.indexOf("dockingDoors") !== -1 || urlStr.indexOf("conveyances") !== -1;
+    }
+
     function gestisciRispostaIntercettata(url, testoBody) {
         const urlStr = String(url || "");
+        if (!urlDiInteresse(urlStr)) return;
         try {
             if (urlStr.indexOf("dockingDoors") !== -1) {
                 elaboraRispostaDockingDoors(JSON.parse(testoBody));
@@ -34,9 +39,11 @@
             return origOpen.apply(this, arguments);
         };
         XMLHttpRequest.prototype.send = function (body) {
-            this.addEventListener("load", function () {
-                try { gestisciRispostaIntercettata(this._tntUrl, this.responseText); } catch (e) {}
-            });
+            if (urlDiInteresse(String(this._tntUrl || ""))) {
+                this.addEventListener("load", function () {
+                    try { gestisciRispostaIntercettata(this._tntUrl, this.responseText); } catch (e) {}
+                });
+            }
             return origSend.apply(this, arguments);
         };
     })();
@@ -46,12 +53,15 @@
         const origFetch = window.fetch;
         window.fetch = function (input, init) {
             const url = typeof input === "string" ? input : (input && input.url) || "";
+            const interessa = urlDiInteresse(String(url));
             return origFetch.apply(this, arguments).then((response) => {
-                try {
-                    response.clone().text().then((testo) => {
-                        try { gestisciRispostaIntercettata(url, testo); } catch (e) {}
-                    }).catch(() => {});
-                } catch (e) {}
+                if (interessa) {
+                    try {
+                        response.clone().text().then((testo) => {
+                            try { gestisciRispostaIntercettata(url, testo); } catch (e) {}
+                        }).catch(() => {});
+                    } catch (e) {}
+                }
                 return response;
             });
         };
@@ -61,105 +71,73 @@
     const cacheCutoffPerBaia = new Map();
 
     const STORAGE_KEY_CACHE_MOVIMENTI = "tnt_cache_movimenti_v1";
-    const STORAGE_KEY_CACHE_CUTOFF = "tnt_cache_cutoff_baia_v1";
+    const STORAGE_KEY_CACHE_CUTOFF_BAIA = "tnt_cache_cutoff_baia_v1";
     const TTL_CACHE_MS = 45 * 60 * 1000;
 
-    function serializzaRisultatoCutoff(r) {
-        if (!r) return null;
-        return {
-            cat: r.cat,
-            cutoffDate: r.cutoffDate ? r.cutoffDate.toISOString() : null,
-            cutoffOriginale: r.cutoffOriginale ? r.cutoffOriginale.toISOString() : null,
-            ritardo: !!r.ritardo
-        };
-    }
-    function deserializzaRisultatoCutoff(o) {
-        if (!o || !o.cutoffDate) return null;
-        const cutoffDate = new Date(o.cutoffDate);
-        if (isNaN(cutoffDate.getTime())) return null;
-        const risultato = { cat: o.cat, cutoffDate: cutoffDate, ritardo: !!o.ritardo };
-        if (o.cutoffOriginale) {
-            const co = new Date(o.cutoffOriginale);
-            if (!isNaN(co.getTime())) risultato.cutoffOriginale = co;
-        }
-        return risultato;
+    function salvaCacheMovimentiSuStorage() {
+        try {
+            const obj = {};
+            cacheMovimentiPerUnit.forEach((v, k) => { obj[k] = v; });
+            localStorage.setItem(STORAGE_KEY_CACHE_MOVIMENTI, JSON.stringify({ ts: Date.now(), dati: obj }));
+        } catch (e) {}
     }
 
-    let persistTimerMovimenti = null;
-    let persistTimerCutoff = null;
-
-    function persistiCacheMovimenti() {
-        clearTimeout(persistTimerMovimenti);
-        persistTimerMovimenti = setTimeout(() => {
-            try {
-                const obj = {};
-                cacheMovimentiPerUnit.forEach((v, k) => { obj[k] = v; });
-                localStorage.setItem(STORAGE_KEY_CACHE_MOVIMENTI, JSON.stringify({ ts: Date.now(), dati: obj }));
-            } catch (e) {}
-        }, 300);
+    function caricaCacheMovimentiDaStorage() {
+        try {
+            const grezzo = localStorage.getItem(STORAGE_KEY_CACHE_MOVIMENTI);
+            if (!grezzo) return;
+            const parsed = JSON.parse(grezzo);
+            if (!parsed || !parsed.dati || (Date.now() - parsed.ts) > TTL_CACHE_MS) return;
+            Object.keys(parsed.dati).forEach((k) => cacheMovimentiPerUnit.set(k, parsed.dati[k]));
+        } catch (e) {}
     }
-    function persistiCacheCutoff() {
-        clearTimeout(persistTimerCutoff);
-        persistTimerCutoff = setTimeout(() => {
-            try {
-                const obj = {};
-                cacheCutoffPerBaia.forEach((v, k) => {
-                    const s = serializzaRisultatoCutoff(v);
-                    if (s) obj[k] = s;
+
+    function salvaCacheCutoffBaiaSuStorage() {
+        try {
+            const obj = {};
+            cacheCutoffPerBaia.forEach((v, k) => {
+                obj[k] = {
+                    catNome: v.cat ? v.cat.nome : null,
+                    catTurno: v.cat ? v.cat.turno : null,
+                    cutoffDateIso: v.cutoffDate ? v.cutoffDate.toISOString() : null,
+                    ritardo: !!v.ritardo,
+                    cutoffOriginaleIso: v.cutoffOriginale ? v.cutoffOriginale.toISOString() : null
+                };
+            });
+            localStorage.setItem(STORAGE_KEY_CACHE_CUTOFF_BAIA, JSON.stringify({ ts: Date.now(), dati: obj }));
+        } catch (e) {}
+    }
+
+    function caricaCacheCutoffBaiaDaStorage() {
+        try {
+            const grezzo = localStorage.getItem(STORAGE_KEY_CACHE_CUTOFF_BAIA);
+            if (!grezzo) return;
+            const parsed = JSON.parse(grezzo);
+            if (!parsed || !parsed.dati || (Date.now() - parsed.ts) > TTL_CACHE_MS) return;
+            Object.keys(parsed.dati).forEach((k) => {
+                const v = parsed.dati[k];
+                if (!v || !v.cutoffDateIso) return;
+                cacheCutoffPerBaia.set(k, {
+                    cat: { nome: v.catNome, turno: v.catTurno },
+                    cutoffDate: new Date(v.cutoffDateIso),
+                    ritardo: v.ritardo,
+                    cutoffOriginale: v.cutoffOriginaleIso ? new Date(v.cutoffOriginaleIso) : null
                 });
-                localStorage.setItem(STORAGE_KEY_CACHE_CUTOFF, JSON.stringify({ ts: Date.now(), dati: obj }));
-            } catch (e) {}
-        }, 300);
-    }
-
-    function ripristinaCacheDaStorage() {
-        try {
-            const raw = localStorage.getItem(STORAGE_KEY_CACHE_MOVIMENTI);
-            if (raw) {
-                const parsed = JSON.parse(raw);
-                if (parsed && typeof parsed.ts === "number" && (Date.now() - parsed.ts) < TTL_CACHE_MS && parsed.dati) {
-                    Object.keys(parsed.dati).forEach((k) => cacheMovimentiPerUnit.set(k, parsed.dati[k]));
-                } else {
-                    localStorage.removeItem(STORAGE_KEY_CACHE_MOVIMENTI);
-                }
-            }
-        } catch (e) {}
-        try {
-            const raw2 = localStorage.getItem(STORAGE_KEY_CACHE_CUTOFF);
-            if (raw2) {
-                const parsed2 = JSON.parse(raw2);
-                if (parsed2 && typeof parsed2.ts === "number" && (Date.now() - parsed2.ts) < TTL_CACHE_MS && parsed2.dati) {
-                    Object.keys(parsed2.dati).forEach((k) => {
-                        const d = deserializzaRisultatoCutoff(parsed2.dati[k]);
-                        if (d) cacheCutoffPerBaia.set(k, d);
-                    });
-                } else {
-                    localStorage.removeItem(STORAGE_KEY_CACHE_CUTOFF);
-                }
-            }
+            });
         } catch (e) {}
     }
-    ripristinaCacheDaStorage();
 
-    window.tntDebug = {
-        stato: function () {
-            const arrivi = caricaArriviBaia();
-            const storico = caricaStoricoReport();
-            const info = {
-                unitIdInCacheMovimenti: cacheMovimentiPerUnit.size,
-                baieConCutoffCachato: cacheCutoffPerBaia.size,
-                baieConArrivoTracciato: Object.keys(arrivi).length,
-                vociStoricoReport: storico.length,
-                cachePersistitaInLocalStorage: {
-                    movimenti: !!localStorage.getItem(STORAGE_KEY_CACHE_MOVIMENTI),
-                    cutoffBaia: !!localStorage.getItem(STORAGE_KEY_CACHE_CUTOFF)
-                },
-                ttlCacheMinuti: TTL_CACHE_MS / 60000
-            };
-            if (typeof console.table === "function") console.table(info); else console.log(info);
-            return info;
-        }
-    };
+    function impostaCutoffBaiaCache(doorNumber, risultato) {
+        cacheCutoffPerBaia.set(doorNumber, risultato);
+        salvaCacheCutoffBaiaSuStorage();
+    }
+
+    function rimuoviCutoffBaiaCache(doorNumber) {
+        if (cacheCutoffPerBaia.delete(doorNumber)) salvaCacheCutoffBaiaSuStorage();
+    }
+
+    caricaCacheMovimentiDaStorage();
+    caricaCacheCutoffBaiaDaStorage();
 
     function sembraListaMovimenti(dati) {
         return Array.isArray(dati) && dati.length > 0 && dati[0] && typeof dati[0] === "object"
@@ -182,7 +160,7 @@
                 });
             });
         });
-        persistiCacheMovimenti();
+        salvaCacheMovimentiSuStorage();
     }
 
     function calcolaCutoffDaCacheMovimenti(doorNumber) {
@@ -216,15 +194,14 @@
             if (porta.status !== "OCCUPIED" || !unit) {
                 if (arrivi[doorNumber]) {
                     delete arrivi[doorNumber];
-                    cacheCutoffPerBaia.delete(doorNumber);
-                    persistiCacheCutoff();
+                    rimuoviCutoffBaiaCache(doorNumber);
                     modificato = true;
                 }
                 return;
             }
             const unitId = unit.unitId;
             const esistente = arrivi[doorNumber];
-            if (!esistente || esistente.unitId !== unitId) cacheCutoffPerBaia.delete(doorNumber);
+            if (!esistente || esistente.unitId !== unitId) rimuoviCutoffBaiaCache(doorNumber);
             if (!esistente || esistente.unitId !== unitId || unit.currentAction === "START_UNLOADING") {
                 let orario;
                 if (unit.currentAction === "START_UNLOADING" && (unit.updatedDateTimestamp || unit.updatedDate)) {
@@ -384,18 +361,17 @@
         ".tnt-card-ambra .tnt-badge{background:#4d2c04;color:#FFE1AD;}",
         ".tnt-card-verde{border-left-color:#5DCAA5;}",
         ".tnt-card-verde .tnt-badge{background:#043d33;color:#BFF3DF;}",
+        ".tnt-panel-toolbar{display:flex;align-items:center;justify-content:space-between;padding:2px 6px 12px;gap:8px;}",
+        ".tnt-panel-counter{font-size:12px;font-weight:700;color:#FF7A00;white-space:nowrap;}",
+        ".tnt-btn-refresh{background:#2c2c2e;color:#f2f2f2;border:1px solid #444;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;}",
+        ".tnt-btn-refresh:hover{background:#3a3a3d;}",
         ".tnt-empty{padding:16px 8px;opacity:0.85;font-family:Roboto,sans-serif;color:#e2e2e5;font-size:13px;text-align:center;}",
         ".tnt-footnote{padding:10px 6px 4px;font-size:10px;color:#FF8B8A;font-family:Roboto,sans-serif;}",
         ".tnt-panel-body label{display:block;font-size:12px;margin-bottom:3px;color:#c7c7cc;}",
         ".tnt-panel-body input[type=date]{width:100%;margin-bottom:12px;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;box-sizing:border-box;}",
         ".tnt-panel-body button{width:100%;padding:9px;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;margin-bottom:8px;border:none;}",
         ".tnt-btn-primary{background:#FF7A00;color:#1c1c1e;}",
-        ".tnt-btn-secondary{background:#2c2c2e;color:#f2f2f2;border:1px solid #444 !important;}",
-        ".tnt-panel-summary{position:sticky;top:-10px;margin:-10px -10px 8px;padding:10px 12px;background:#242426;border-bottom:1px solid #333;display:flex;align-items:center;justify-content:space-between;gap:8px;z-index:2;}",
-        ".tnt-panel-summary-count{font-size:13px;font-weight:700;color:#ffffff;}",
-        ".tnt-btn-refresh{background:#2c2c2e;color:#f2f2f2;border:1px solid #444;border-radius:6px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;}",
-        ".tnt-btn-refresh:hover{background:#37373a;}",
-        ".tnt-btn-refresh:active{background:#444;}"
+        ".tnt-btn-secondary{background:#2c2c2e;color:#f2f2f2;border:1px solid #444 !important;}"
     ].join("");
     document.head.appendChild(stileBlink);
 
@@ -525,7 +501,7 @@
                     }
                 }
                 aggiornaRigaArrivoECountdown(contenitore, risultato);
-                if (risultato && baiaSelezionata) { cacheCutoffPerBaia.set(baiaSelezionata, risultato); persistiCacheCutoff(); }
+                if (risultato && baiaSelezionata) impostaCutoffBaiaCache(baiaSelezionata, risultato);
                 if (!origineEl || !arrivoEl) return;
                 const chiave = codiceOrigine + "|" + testoArrivo + "|" + testoActualArrivo + "|" + testoArrivoPorta;
                 if (sezione.getAttribute("data-tnt-turno-key") === chiave) return;
@@ -748,17 +724,17 @@
             return;
         }
 
-        let csvContent = "data:text/csv;charset=utf-8,";
-        csvContent += "Data;Baia;Unit ID;Ora Arrivo Reale;Codice;Localita;Info Viaggio;Ora Cutoff;Turno;Categoria Cutoff;Slittato per Late Arrival;Cutoff Originale\n";
+        let csvContent = "Data;Baia;Unit ID;Ora Arrivo Reale;Codice;Localita;Info Viaggio;Ora Cutoff;Turno;Categoria Cutoff;Slittato per Late Arrival;Cutoff Originale\n";
 
         storico.forEach(r => {
             const riga = `${r.data};${r.doorNumber};${r.unitId};${r.orarioArrivo};${r.codiceOrigine};${r.localita};${r.viaggio};${r.cutoffOrario};${r.cutoffTurno};${r.cutoffTipo};${r.ritardoFlag || "No"};${r.cutoffOriginaleTesto || ""}`;
             csvContent += riga + "\n";
         });
 
-        const encodedUri = encodeURI(csvContent);
+        const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
+        const blobUrl = URL.createObjectURL(blob);
         const link = document.createElement("a");
-        link.setAttribute("href", encodedUri);
+        link.setAttribute("href", blobUrl);
         const suffisso = (dataInizioStr || dataFineStr)
             ? `_${dataInizioStr || "inizio"}_a_${dataFineStr || "fine"}`
             : `_TUTTO_${new Date().toISOString().slice(0,10)}`;
@@ -766,39 +742,29 @@
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
     }
 
     function renderPannelloReport(panelBody) {
-        try {
-            if (!panelBody) return;
-            const oggi = new Date().toISOString().slice(0, 10);
-            panelBody.innerHTML =
-                '<label>Dal giorno</label>' +
-                '<input type="date" id="tnt-report-data-inizio" value="' + oggi + '">' +
-                '<label>Al giorno</label>' +
-                '<input type="date" id="tnt-report-data-fine" value="' + oggi + '">' +
-                '<button id="tnt-report-btn-scarica" class="tnt-btn-primary">Scarica CSV periodo</button>' +
-                '<button id="tnt-report-btn-tutto" class="tnt-btn-secondary">Scarica tutto lo storico</button>';
+        const oggi = new Date().toISOString().slice(0, 10);
+        panelBody.innerHTML =
+            '<label>Dal giorno</label>' +
+            '<input type="date" id="tnt-report-data-inizio" value="' + oggi + '">' +
+            '<label>Al giorno</label>' +
+            '<input type="date" id="tnt-report-data-fine" value="' + oggi + '">' +
+            '<button id="tnt-report-btn-scarica" class="tnt-btn-primary">Scarica CSV periodo</button>' +
+            '<button id="tnt-report-btn-tutto" class="tnt-btn-secondary">Scarica tutto lo storico</button>';
 
-            const btnScarica = document.getElementById("tnt-report-btn-scarica");
-            const btnTutto = document.getElementById("tnt-report-btn-tutto");
-            if (btnScarica) {
-                btnScarica.addEventListener("click", (e) => {
-                    e.stopPropagation();
-                    const dataInizio = document.getElementById("tnt-report-data-inizio").value;
-                    const dataFine = document.getElementById("tnt-report-data-fine").value;
-                    scaricaReportCSV(dataInizio || null, dataFine || null);
-                });
-            }
-            if (btnTutto) {
-                btnTutto.addEventListener("click", (e) => {
-                    e.stopPropagation();
-                    scaricaReportCSV(null, null);
-                });
-            }
-        } catch (e) {
-            if (panelBody) panelBody.innerHTML = '<div class="tnt-empty">Errore nel caricamento pannello report.</div>';
-        }
+        document.getElementById("tnt-report-btn-scarica").addEventListener("click", (e) => {
+            e.stopPropagation();
+            const dataInizio = document.getElementById("tnt-report-data-inizio").value;
+            const dataFine = document.getElementById("tnt-report-data-fine").value;
+            scaricaReportCSV(dataInizio || null, dataFine || null);
+        });
+        document.getElementById("tnt-report-btn-tutto").addEventListener("click", (e) => {
+            e.stopPropagation();
+            scaricaReportCSV(null, null);
+        });
     }
 
     function aggiornaTracciamentoArrivi() {
@@ -1007,47 +973,39 @@
             if (!infoCutoff && baiaSelezionata === baia.doorNumber) {
                 assicuraTabInbound();
                 infoCutoff = leggiCutoffBaiaCorrente();
-                if (infoCutoff) { cacheCutoffPerBaia.set(baia.doorNumber, infoCutoff.cutoff); persistiCacheCutoff(); }
+                if (infoCutoff) impostaCutoffBaiaCache(baia.doorNumber, infoCutoff.cutoff);
             }
             if (!infoCutoff) continue;
             aggiungiAlGruppo(infoCutoff.cutoff, baia.doorNumber);
         }
-        let corpoHtml;
         if (!trovatoQualcosa) {
-            corpoHtml = '<div class="tnt-empty">Nessun camion/baia trovato</div>';
-        } else {
-            corpoHtml = costruisciHtmlGruppiScarico(gruppi);
+            panelBody.innerHTML = renderToolbarScarico(0) + '<div class="tnt-empty">Nessun camion/baia trovato</div>';
+            collegaRefreshScarico(panelBody);
+            return;
         }
-        const totale = contaTotaleBaieScarico(gruppi);
-        renderTestataPannello(panelBody, totale, "carico in scadenza", "carichi in scadenza", corpoHtml, () => scansionaBaieScarico(panelBody));
+        renderPannelloScaricoConteggi(panelBody, gruppi);
     }
 
-    function contaTotaleBaieScarico(gruppi) {
-        let tot = 0;
-        gruppi.forEach((g) => { tot += g.baie.length; });
-        return tot;
+    function renderToolbarScarico(totale) {
+        return '<div class="tnt-panel-toolbar">'
+            + '<span class="tnt-panel-counter">' + totale + ' in scadenza</span>'
+            + '<button id="tnt-scarico-refresh-btn" class="tnt-btn-refresh" title="Aggiorna ora">&#8635; Aggiorna</button>'
+            + '</div>';
     }
 
-    function renderTestataPannello(panelBody, totale, etichettaSingolare, etichettaPlurale, corpoHtml, onRefresh) {
-        const etichetta = totale === 1 ? etichettaSingolare : etichettaPlurale;
-        panelBody.innerHTML =
-            '<div class="tnt-panel-summary">' +
-                '<span class="tnt-panel-summary-count">' + totale + ' ' + etichetta + '</span>' +
-                '<button type="button" class="tnt-btn-refresh" title="Aggiorna ora">&#8635; Aggiorna</button>' +
-            '</div>' +
-            corpoHtml;
-        const btnRefresh = panelBody.querySelector(".tnt-btn-refresh");
-        if (btnRefresh && onRefresh) {
-            btnRefresh.addEventListener("click", (e) => {
-                e.stopPropagation();
-                onRefresh();
-            });
-        }
+    function collegaRefreshScarico(panelBody) {
+        const btn = panelBody.querySelector("#tnt-scarico-refresh-btn");
+        if (btn) btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            scansionaBaieScarico(panelBody);
+        });
     }
 
-    function costruisciHtmlGruppiScarico(gruppi) {
+    function renderPannelloScaricoConteggi(panelBody, gruppi) {
         if (gruppi.size === 0) {
-            return '<div class="tnt-empty">Nessuno scarico in scadenza</div>';
+            panelBody.innerHTML = renderToolbarScarico(0) + '<div class="tnt-empty">Nessuno scarico in scadenza</div>';
+            collegaRefreshScarico(panelBody);
+            return;
         }
         const ora = new Date();
         const voci = [...gruppi.entries()].sort((a, b) => a[1].orario.getTime() - b[1].orario.getTime());
@@ -1087,7 +1045,9 @@
         if (presenteAsterisco) {
             html += '<div class="tnt-footnote">* slittato al cutoff successivo per late arrival (meno di 150min di lavorazione disponibili)</div>';
         }
-        return html;
+        const totale = voci.reduce((acc, [, info]) => acc + info.baie.length, 0);
+        panelBody.innerHTML = renderToolbarScarico(totale) + html;
+        collegaRefreshScarico(panelBody);
     }
 
     function aggiornaPannelloOutbound() {
@@ -1114,8 +1074,7 @@
                     + '</div>';
             }).join("");
         });
-        const corpoHtml = html || '<div class="tnt-empty">Nessuna baia in scadenza</div>';
-        renderTestataPannello(body, risultati.length, "unit ready in scadenza", "unit ready in scadenza", corpoHtml, aggiornaPannelloOutbound);
+        body.innerHTML = html || '<div class="tnt-empty">Nessuna baia in scadenza</div>';
     }
 
     function creaIconaMenu(id, coloreCerchio, disegnoSvg) {
@@ -1166,29 +1125,19 @@
     }
 
     const ORDINE_GRUPPO_CARICO_SCARICO = ["tnt-orologio-panel", "tnt-orologio-scarico-panel"];
-    const bottoniPerPannelloSingolo = new Map();
-    const MARGINE_ALTO = 8;
-    const MARGINE_BASSO = 16;
-
-    function calcolaAncoraggio(rectMenu) {
-        const top = Math.max(MARGINE_ALTO, Math.min(rectMenu.top, window.innerHeight - 60));
-        const altezzaDisponibile = Math.max(200, window.innerHeight - top - MARGINE_BASSO);
-        const left = Math.max(0, Math.min(rectMenu.right, window.innerWidth - 40));
-        return { top, altezzaDisponibile, left };
-    }
 
     function posizionaPannelliGruppo(ordineIds) {
         const menu = document.querySelector(".cc-hub-menu-panel");
         if (!menu) return;
         const rectMenu = menu.getBoundingClientRect();
-        const ancora = calcolaAncoraggio(rectMenu);
-        let leftCorrente = ancora.left;
+        const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
+        let leftCorrente = rectMenu.right;
         ordineIds.forEach((id) => {
             const p = document.getElementById(id);
             if (!pannelloAperto(p)) return;
-            p.style.top = ancora.top + "px";
+            p.style.top = rectMenu.top + "px";
             p.style.left = leftCorrente + "px";
-            p.style.height = ancora.altezzaDisponibile + "px";
+            p.style.height = Math.max(altezzaDisponibile, 200) + "px";
             leftCorrente += p.getBoundingClientRect().width;
         });
     }
@@ -1196,24 +1145,13 @@
     function posizionaPannelloSingolo(panel, btn) {
         const menu = document.querySelector(".cc-hub-menu-panel");
         const rectMenu = menu ? menu.getBoundingClientRect() : btn.getBoundingClientRect();
-        const ancora = calcolaAncoraggio(rectMenu);
-        panel.style.top = ancora.top + "px";
-        panel.style.left = ancora.left + "px";
-        panel.style.height = ancora.altezzaDisponibile + "px";
-    }
-
-    function riposizionaTuttiIPannelliAperti() {
-        try { posizionaPannelliGruppo(ORDINE_GRUPPO_CARICO_SCARICO); } catch (e) {}
-        document.querySelectorAll(".tnt-panel").forEach((p) => {
-            if (ORDINE_GRUPPO_CARICO_SCARICO.indexOf(p.id) !== -1) return;
-            if (!pannelloAperto(p)) return;
-            const btn = bottoniPerPannelloSingolo.get(p.id);
-            if (btn) { try { posizionaPannelloSingolo(p, btn); } catch (e) {} }
-        });
+        const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
+        panel.style.top = rectMenu.top + "px";
+        panel.style.left = rectMenu.right + "px";
+        panel.style.height = Math.max(altezzaDisponibile, 200) + "px";
     }
 
     function collegaClick(btn, panel, callbackAggiorna, gruppoIds) {
-        if (!gruppoIds) bottoniPerPannelloSingolo.set(panel.id, btn);
         btn.addEventListener("click", (e) => {
             e.stopPropagation();
             const eraAperto = pannelloAperto(panel);
@@ -1274,8 +1212,9 @@
         chiudiPannelliEsclusi(ORDINE_GRUPPO_CARICO_SCARICO);
     });
 
-    window.addEventListener("resize", riposizionaTuttiIPannelliAperti);
-    window.addEventListener("scroll", riposizionaTuttiIPannelliAperti, true);
+    window.addEventListener("resize", () => {
+        posizionaPannelliGruppo(ORDINE_GRUPPO_CARICO_SCARICO);
+    });
 
     document.addEventListener("click", (e) => {
         const wrapper = e.target.closest('[id^="unit_"]');
@@ -1304,7 +1243,7 @@
         try { aggiornaTracciamentoArrivi(); } catch (e) {}
         try { processaTripDetails(); } catch (e) {}
         try { aggiornaPannelloOutbound(); } catch (e) {}
-        try { riposizionaTuttiIPannelliAperti(); } catch (e) {}
+        try { posizionaPannelliGruppo(ORDINE_GRUPPO_CARICO_SCARICO); } catch (e) {}
     }
 
     const observer = new MutationObserver((mutations) => {
@@ -1324,6 +1263,26 @@
 
     setInterval(aggiornaTracciamentoArrivi, 5000);
     setInterval(aggiornaPannelloOutbound, 15000);
+    setInterval(() => { try { posizionaPannelliGruppo(ORDINE_GRUPPO_CARICO_SCARICO); } catch (e) {} }, 15000);
     setInterval(pulisciStoricoVecchio, 60 * 60 * 1000);
-    setInterval(() => { try { persistiCacheMovimenti(); persistiCacheCutoff(); } catch (e) {} }, 30000);
+
+    window.tntDebug = {
+        stato: function () {
+            const info = {
+                unitInCacheMovimenti: cacheMovimentiPerUnit.size,
+                baieConCutoffCachato: cacheCutoffPerBaia.size,
+                baieOccupateTracciate: Object.keys(caricaArriviBaia()).length,
+                baiaSelezionataOra: baiaSelezionata
+            };
+            console.log("[YOS TOOL] Stato cache:", info);
+            return info;
+        },
+        svuotaCache: function () {
+            cacheMovimentiPerUnit.clear();
+            cacheCutoffPerBaia.clear();
+            try { localStorage.removeItem(STORAGE_KEY_CACHE_MOVIMENTI); } catch (e) {}
+            try { localStorage.removeItem(STORAGE_KEY_CACHE_CUTOFF_BAIA); } catch (e) {}
+            console.log("[YOS TOOL] Cache svuotata.");
+        }
+    };
 })();
