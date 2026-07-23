@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -176,8 +176,18 @@
         for (const numEl of nodi) {
             const span = numEl.querySelector("span");
             if (!span || span.textContent.trim() !== doorNumber) continue;
-            const wrapper = numEl.closest('[id^="unit_"]');
-            if (wrapper) return wrapper;
+            const wrapperStandard = numEl.closest('[id^="unit_"]');
+            if (wrapperStandard) return wrapperStandard;
+            // Alcune baie (es. parcheggi/"reverse") non hanno un antenato con id="unit_...":
+            // risaliamo il DOM finché non troviamo un contenitore che include anche il blocco
+            // "container_" o "parking_area_" (dove si trova l'icona blu di "pronto").
+            let nodo = numEl.parentElement;
+            let salti = 0;
+            while (nodo && salti < 6) {
+                if (nodo.querySelector('[id^="container_"].unit-assigned, [id^="parking_area_"].unit-assigned')) return nodo;
+                nodo = nodo.parentElement;
+                salti++;
+            }
         }
         return null;
     }
@@ -917,18 +927,21 @@
             if (!gruppi.has(chiave)) gruppi.set(chiave, { nome: risultato.cat.nome, turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
             gruppi.get(chiave).baie.push(risultato.ritardo ? infoBaia + "*" : infoBaia);
         }
-        // --- 1) Baie di scarico: fonte primaria = cache persistente "arrivi baia", alimentata
-        // dall'intercettazione delle chiamate dockingDoors (ed eventualmente dal fallback DOM
-        // periodico di aggiornaTracciamentoArrivi). Usare questa cache invece di scansionare solo
-        // il DOM visibile in questo istante garantisce che nessun camion messo allo scarico venga
-        // perso, anche se in quel momento non è renderizzato/visibile a schermo.
+        // --- 1) Baie di scarico: unione di due fonti.
+        // (a) Cache persistente "arrivi baia", alimentata dall'intercettazione delle chiamate
+        //     dockingDoors (ed eventualmente dal fallback DOM periodico di aggiornaTracciamentoArrivi):
+        //     garantisce di non perdere un camion anche se in questo istante il DOM non lo mostra.
+        // (b) Scansione diretta del DOM delle baie attualmente occupate: garantisce che se la voce
+        //     in cache viene rimossa per qualsiasi motivo (es. l'API segnala momentaneamente la baia
+        //     non più occupata) ma il camion è ancora fisicamente lì, non sparisca comunque dal pannello.
         const arriviBaiaCache = caricaArriviBaia();
         const doorsGiaContate = new Set();
         const movementIdGiaContati = new Set();
-        Object.keys(arriviBaiaCache).forEach((doorNumber) => {
-            if (categoriaBaia(doorNumber) !== "Scarico") return;
-            trovatoQualcosa = true;
+
+        function elaboraBaiaOccupata(doorNumber) {
+            if (doorsGiaContate.has(doorNumber)) return;
             doorsGiaContate.add(doorNumber);
+            trovatoQualcosa = true;
             const voce = arriviBaiaCache[doorNumber];
             if (voce && voce.unitId) {
                 const mov = cacheMovimentiPerUnit.get(String(voce.unitId));
@@ -946,6 +959,23 @@
             }
             if (!infoCutoff) return;
             aggiungiAlGruppo(infoCutoff.cutoff, doorNumber);
+        }
+
+        Object.keys(arriviBaiaCache).forEach((doorNumber) => {
+            if (categoriaBaia(doorNumber) !== "Scarico") return;
+            elaboraBaiaOccupata(doorNumber);
+        });
+
+        document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO).forEach((numEl) => {
+            const span = numEl.querySelector("span");
+            if (!span) return;
+            const doorNumber = span.textContent.trim();
+            if (!doorNumber || categoriaBaia(doorNumber) !== "Scarico") return;
+            const wrapper = numEl.closest('[id^="unit_"]');
+            if (!wrapper) return;
+            const container = wrapper.querySelector('[id^="container_"].unit-assigned');
+            if (!container) return;
+            elaboraBaiaOccupata(doorNumber);
         });
 
         // --- 2) Menù "scheduled": camion non ancora arrivati a una baia. Se un camion risulta
