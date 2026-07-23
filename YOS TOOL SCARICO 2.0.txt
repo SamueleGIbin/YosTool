@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.0
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -70,7 +70,8 @@
             if (!m || !Array.isArray(m.units)) return;
             m.units.forEach((u) => {
                 if (!u || !u.unitId) return;
-                cacheMovimentiPerUnit.set(String(u.unitId), {
+                const chiave = String(u.unitId);
+                const voceMov = {
                     origin: m.origin,
                     destination: m.destination,
                     scheduleArrival: m.scheduleArrival,
@@ -79,26 +80,56 @@
                     movementName: m.movementName,
                     tripTourDescription: m.trip ? m.trip.tripTourDescription : "",
                     movementId: m.movementId != null ? String(m.movementId) : null
-                });
+                };
+                const esistenti = cacheMovimentiPerUnit.get(chiave) || [];
+                const idx = voceMov.movementId ? esistenti.findIndex((v) => v.movementId === voceMov.movementId) : -1;
+                if (idx !== -1) esistenti[idx] = voceMov;
+                else esistenti.push(voceMov);
+                // Teniamo solo gli ultimi movimenti per unità: basta per disambiguare senza
+                // far crescere la cache all'infinito su una giornata intera.
+                while (esistenti.length > 8) esistenti.shift();
+                cacheMovimentiPerUnit.set(chiave, esistenti);
             });
         });
+    }
+
+    // Lo stesso unitId (stesso trailer fisico) può comparire in più viaggi nella stessa
+    // giornata: non basta prendere "l'ultimo aggiornato", va scelto il movimento il cui
+    // orario di arrivo è più vicino all'orario REALE di arrivo alla baia (arrivoPortaReale),
+    // perché è l'unico dato che ci dice, senza aprire nulla, quale viaggio è quello in corso ora.
+    function sceglieMovimentoPerUnit(unitId, arrivoPortaReale) {
+        const movimenti = cacheMovimentiPerUnit.get(String(unitId));
+        if (!movimenti || movimenti.length === 0) return null;
+        if (movimenti.length === 1) return movimenti[0];
+        if (!arrivoPortaReale || isNaN(arrivoPortaReale.getTime())) return movimenti[movimenti.length - 1];
+        let scelto = null;
+        let migliorDiff = Infinity;
+        movimenti.forEach((mov) => {
+            const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
+            if (!arrivoIso) return;
+            const arrivoMov = new Date(arrivoIso);
+            if (isNaN(arrivoMov.getTime())) return;
+            const diff = Math.abs(arrivoMov.getTime() - arrivoPortaReale.getTime());
+            if (diff < migliorDiff) { migliorDiff = diff; scelto = mov; }
+        });
+        return scelto || movimenti[movimenti.length - 1];
     }
 
     function calcolaCutoffDaCacheMovimenti(doorNumber) {
         const arrivi = caricaArriviBaia();
         const voce = arrivi[doorNumber];
         if (!voce || !voce.unitId) return null;
-        const mov = cacheMovimentiPerUnit.get(String(voce.unitId));
-        if (!mov || !mov.origin) return null;
-        const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
-        if (!arrivoIso) return null;
-        const arrivo = new Date(arrivoIso);
-        if (isNaN(arrivo.getTime())) return null;
         let arrivoPortaReale = null;
         if (voce.orario) {
             const d = new Date(voce.orario);
             if (!isNaN(d.getTime())) arrivoPortaReale = d;
         }
+        const mov = sceglieMovimentoPerUnit(voce.unitId, arrivoPortaReale);
+        if (!mov || !mov.origin) return null;
+        const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
+        if (!arrivoIso) return null;
+        const arrivo = new Date(arrivoIso);
+        if (isNaN(arrivo.getTime())) return null;
         const risultato = calcolaCutoffPerCodice(mov.origin, arrivo, arrivoPortaReale);
         if (!risultato) return null;
         return { cutoff: risultato, codice: mov.origin };
@@ -143,32 +174,14 @@
                 const orarioCambiato = !esistente || esistente.orario !== orario;
                 if (cambiaUnit || orarioCambiato) {
                     cacheCutoffPerBaia.delete(doorNumber);
-                    unitVerificatiCutoff.delete(String(unitId));
                 }
                 arrivi[doorNumber] = { unitId: unitId, orario: orario };
                 modificato = true;
 
                 if (cambiaUnit) registraInStoricoReport(doorNumber, unitId, orario);
-                if (categoriaBaia(doorNumber) === "Scarico" && (cambiaUnit || orarioCambiato)) accodaVerificaBaia(doorNumber, unitId);
             }
         });
         if (modificato) salvaArriviBaia(arrivi);
-    }
-
-    // --- Coda di verifica cutoff: garantisce che OGNI truck a una baia di scarico venga
-    // controllato almeno una volta, senza dover riscansionare tutte le baie a ripetizione.
-    // Un nuovo truck viene accodato solo nel momento esatto in cui viene rilevato (evento),
-    // non con un polling periodico su tutte le baie.
-    const unitVerificatiCutoff = new Set();
-    const codaVerificaBaie = [];
-    let codaInLavorazione = false;
-
-    function accodaVerificaBaia(doorNumber, unitId) {
-        if (!doorNumber || !unitId) return;
-        const chiave = String(unitId);
-        if (unitVerificatiCutoff.has(chiave)) return;
-        if (codaVerificaBaie.some((v) => v.unitId === chiave)) return;
-        codaVerificaBaie.push({ doorNumber, unitId: chiave, tentativi: 0 });
     }
 
     function trovaElementoBaiaPerNumero(doorNumber) {
@@ -190,45 +203,6 @@
             }
         }
         return null;
-    }
-
-    async function elaboraCodaVerificaBaie() {
-        if (codaInLavorazione || codaVerificaBaie.length === 0) return;
-        codaInLavorazione = true;
-        try {
-            const voce = codaVerificaBaie.shift();
-            const arrivi = caricaArriviBaia();
-            const attuale = arrivi[voce.doorNumber];
-            // Se nel frattempo il truck non è più in quella baia, la voce non è più valida.
-            if (!attuale || String(attuale.unitId) !== voce.unitId) { codaInLavorazione = false; return; }
-            // Se nel frattempo l'API dei movimenti ha già fornito i dati, non serve forzare nulla.
-            if (cacheCutoffPerBaia.has(voce.doorNumber) || calcolaCutoffDaCacheMovimenti(voce.doorNumber)) {
-                unitVerificatiCutoff.add(voce.unitId);
-                codaInLavorazione = false;
-                return;
-            }
-            const wrapper = trovaElementoBaiaPerNumero(voce.doorNumber);
-            if (!wrapper) { codaVerificaBaie.push(voce); codaInLavorazione = false; return; }
-            const baiaPrecedente = baiaSelezionata;
-            wrapper.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-            await new Promise((r) => setTimeout(r, 900));
-            assicuraTabInbound();
-            await new Promise((r) => setTimeout(r, 500));
-            const info = leggiCutoffBaiaCorrente();
-            if (info) {
-                cacheCutoffPerBaia.set(voce.doorNumber, info.cutoff);
-                unitVerificatiCutoff.add(voce.unitId);
-            } else {
-                voce.tentativi = (voce.tentativi || 0) + 1;
-                if (voce.tentativi < 3) codaVerificaBaie.push(voce);
-                else unitVerificatiCutoff.add(voce.unitId);
-            }
-            if (baiaPrecedente && baiaPrecedente !== voce.doorNumber) {
-                const wrapperPrecedente = trovaElementoBaiaPerNumero(baiaPrecedente);
-                if (wrapperPrecedente) wrapperPrecedente.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-            }
-        } catch (e) {}
-        codaInLavorazione = false;
     }
 
     const codeMap = {
@@ -662,7 +636,8 @@
         let cutoffOriginaleTesto = "";
 
         if (unitId) {
-            const mov = cacheMovimentiPerUnit.get(String(unitId));
+            const arrivoPortaRealeReport = new Date(orarioIso);
+            const mov = sceglieMovimentoPerUnit(unitId, !isNaN(arrivoPortaRealeReport.getTime()) ? arrivoPortaRealeReport : null);
             if (mov) {
                 codiceOrigine = mov.origin || "N/A";
                 localita = codeMap[codiceOrigine] || "N/A";
@@ -944,14 +919,16 @@
             trovatoQualcosa = true;
             const voce = arriviBaiaCache[doorNumber];
             if (voce && voce.unitId) {
-                const mov = cacheMovimentiPerUnit.get(String(voce.unitId));
+                const arrivoPortaRealeVoce = voce.orario ? new Date(voce.orario) : null;
+                const mov = sceglieMovimentoPerUnit(voce.unitId, arrivoPortaRealeVoce && !isNaN(arrivoPortaRealeVoce.getTime()) ? arrivoPortaRealeVoce : null);
                 if (mov && mov.movementId) movementIdGiaContati.add(mov.movementId);
             }
-            let infoCutoff = calcolaCutoffDaCacheMovimenti(doorNumber);
-            if (!infoCutoff) {
-                const cutoffCachato = cacheCutoffPerBaia.get(doorNumber);
-                if (cutoffCachato) infoCutoff = { cutoff: cutoffCachato, codice: null };
-            }
+            // Il dato realmente verificato (cacheCutoffPerBaia) ha sempre priorità sulla stima
+            // da cacheMovimentiPerUnit, che può essere stantia (stesso unitId, viaggio diverso).
+            let infoCutoff = null;
+            const cutoffVerificato = cacheCutoffPerBaia.get(doorNumber);
+            if (cutoffVerificato) infoCutoff = { cutoff: cutoffVerificato, codice: null };
+            if (!infoCutoff) infoCutoff = calcolaCutoffDaCacheMovimenti(doorNumber);
             if (!infoCutoff && baiaSelezionata === doorNumber) {
                 assicuraTabInbound();
                 infoCutoff = leggiCutoffBaiaCorrente();
@@ -1299,5 +1276,4 @@
     setInterval(aggiornaTracciamentoArrivi, 5000);
     setInterval(aggiornaPannelloOutbound, 15000);
     setInterval(pulisciStoricoVecchio, 60 * 60 * 1000);
-    setInterval(elaboraCodaVerificaBaie, 4000);
 })();
