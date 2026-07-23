@@ -77,7 +77,8 @@
                     estimatedArrival: m.estimatedArrival,
                     actualArrival: m.actualArrival,
                     movementName: m.movementName,
-                    tripTourDescription: m.trip ? m.trip.tripTourDescription : ""
+                    tripTourDescription: m.trip ? m.trip.tripTourDescription : "",
+                    movementId: m.movementId != null ? String(m.movementId) : null
                 });
             });
         });
@@ -550,6 +551,20 @@
         return COLORI_UNIT_PRONTA.some((c) => colore.indexOf(c) !== -1);
     }
 
+    // Il camion "blu" (pronto, da spostare) è marcato sull'elemento della mappa baie
+    // (classe "unit_ready_outline" sul blocco, oppure "outbound_blue_icon" sull'iconcina
+    // interna), NON sulla riga della lista scheduled. Va quindi cercato l'elemento mappa
+    // corrispondente al numero baia, non la riga stessa.
+    function camionProntoBlu(doorNumber) {
+        if (!doorNumber) return false;
+        const wrapper = trovaElementoBaiaPerNumero(doorNumber);
+        if (!wrapper) return false;
+        if (wrapper.classList && wrapper.classList.contains("unit_ready_outline")) return true;
+        if (wrapper.querySelector(".unit_ready_outline")) return true;
+        if (wrapper.querySelector(".outbound_blue_icon")) return true;
+        return false;
+    }
+
     function leggiOutboundInScadenza() {
         const righe = document.querySelectorAll(".scheduled-root.outbound-task, .scheduled-root.highlight-task, .scheduled-root.highlight-undeparted-unit");
         const risultati = [];
@@ -562,7 +577,7 @@
             const door = doorEl.textContent.trim();
             const testo = dataEl.textContent.trim();
             if (!testo || testo.toUpperCase().includes("N/A") || door === "-" || !door || categoriaBaia(door) === "Scarico") return;
-            if (rigaSegnalataPronta(riga)) return;
+            if (rigaSegnalataPronta(riga) || camionProntoBlu(door)) return;
             const match = testo.match(/(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
             if (!match) return;
             const giorno = parseInt(match[1], 10), mese = parseInt(match[2], 10), ore = parseInt(match[3], 10), minuti = parseInt(match[4], 10);
@@ -584,21 +599,6 @@
     }
 
     const DOOR_NUM_SELECTOR_SCARICO = ".door_number, .west_door_number, .east_door_number, .reverse_door_number";
-    function trovaBaieScaricoOccupate() {
-        const risultati = [];
-        document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO).forEach((numEl) => {
-            const span = numEl.querySelector("span");
-            if (!span) return;
-            const doorNumber = span.textContent.trim();
-            if (!doorNumber || categoriaBaia(doorNumber) !== "Scarico") return;
-            const wrapper = numEl.closest('[id^="unit_"]');
-            if (!wrapper) return;
-            const container = wrapper.querySelector('[id^="container_"].unit-assigned');
-            if (!container) return;
-            risultati.push({ doorNumber, container });
-        });
-        return risultati;
-    }
 
     const STORAGE_KEY_ARRIVI = "tnt_arrivi_baia_scarico_v1";
     const STORAGE_KEY_STORICO = "tnt_storico_report_scarico_v1";
@@ -917,6 +917,39 @@
             if (!gruppi.has(chiave)) gruppi.set(chiave, { nome: risultato.cat.nome, turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
             gruppi.get(chiave).baie.push(risultato.ritardo ? infoBaia + "*" : infoBaia);
         }
+        // --- 1) Baie di scarico: fonte primaria = cache persistente "arrivi baia", alimentata
+        // dall'intercettazione delle chiamate dockingDoors (ed eventualmente dal fallback DOM
+        // periodico di aggiornaTracciamentoArrivi). Usare questa cache invece di scansionare solo
+        // il DOM visibile in questo istante garantisce che nessun camion messo allo scarico venga
+        // perso, anche se in quel momento non è renderizzato/visibile a schermo.
+        const arriviBaiaCache = caricaArriviBaia();
+        const doorsGiaContate = new Set();
+        const movementIdGiaContati = new Set();
+        Object.keys(arriviBaiaCache).forEach((doorNumber) => {
+            if (categoriaBaia(doorNumber) !== "Scarico") return;
+            trovatoQualcosa = true;
+            doorsGiaContate.add(doorNumber);
+            const voce = arriviBaiaCache[doorNumber];
+            if (voce && voce.unitId) {
+                const mov = cacheMovimentiPerUnit.get(String(voce.unitId));
+                if (mov && mov.movementId) movementIdGiaContati.add(mov.movementId);
+            }
+            let infoCutoff = calcolaCutoffDaCacheMovimenti(doorNumber);
+            if (!infoCutoff) {
+                const cutoffCachato = cacheCutoffPerBaia.get(doorNumber);
+                if (cutoffCachato) infoCutoff = { cutoff: cutoffCachato, codice: null };
+            }
+            if (!infoCutoff && baiaSelezionata === doorNumber) {
+                assicuraTabInbound();
+                infoCutoff = leggiCutoffBaiaCorrente();
+                if (infoCutoff) cacheCutoffPerBaia.set(doorNumber, infoCutoff.cutoff);
+            }
+            if (!infoCutoff) return;
+            aggiungiAlGruppo(infoCutoff.cutoff, doorNumber);
+        });
+
+        // --- 2) Menù "scheduled": camion non ancora arrivati a una baia. Se un camion risulta
+        // già contato al punto 1 (stesso movementId), viene saltato per non contarlo due volte.
         const scheduledElements = document.querySelectorAll(".schedule_units");
         if (scheduledElements.length > 0) trovatoQualcosa = true;
         const movimentiScheduledVisti = new Set();
@@ -929,6 +962,7 @@
             if (movementId) {
                 if (movimentiScheduledVisti.has(movementId)) return;
                 movimentiScheduledVisti.add(movementId);
+                if (movementIdGiaContati.has(movementId)) return;
             }
             const codiceOrigine = estraiCodiceGrezzo(originEl);
             const testoArrivo = arrivalEl.textContent.trim();
@@ -939,6 +973,9 @@
             if (!risultato) return;
             aggiungiAlGruppo(risultato, "(" + codiceOrigine + ")");
         });
+
+        // --- 3) "En-route": camion in viaggio verso una baia specifica. Se quella baia è già
+        // stata contata al punto 1, viene saltato per non duplicare lo stesso camion.
         const unitElements = document.querySelectorAll(".arrival_units");
         if (unitElements.length > 0) trovatoQualcosa = true;
         unitElements.forEach((el) => {
@@ -952,10 +989,10 @@
             if (!arrivo) return;
             const doorEl = el.querySelector(".door_number, .west_door_number, .east_door_number, .reverse_door_number");
             const doorNumberTesto = doorEl ? doorEl.textContent.trim() : null;
+            if (doorNumberTesto && doorsGiaContate.has(doorNumberTesto)) return;
             let arrivoPortaReale = null;
             if (doorNumberTesto) {
-                const arriviSalvati = caricaArriviBaia();
-                const voceBaia = arriviSalvati[doorNumberTesto];
+                const voceBaia = arriviBaiaCache[doorNumberTesto];
                 if (voceBaia && voceBaia.orario) {
                     const d = new Date(voceBaia.orario);
                     if (!isNaN(d.getTime())) arrivoPortaReale = d;
@@ -965,22 +1002,7 @@
             if (!risultato) return;
             aggiungiAlGruppo(risultato, doorNumberTesto || "(" + codiceOrigine + ")");
         });
-        const baie = trovaBaieScaricoOccupate();
-        if (baie.length > 0) trovatoQualcosa = true;
-        for (const baia of baie) {
-            let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
-            if (!infoCutoff) {
-                const cutoffCachato = cacheCutoffPerBaia.get(baia.doorNumber);
-                if (cutoffCachato) infoCutoff = { cutoff: cutoffCachato, codice: null };
-            }
-            if (!infoCutoff && baiaSelezionata === baia.doorNumber) {
-                assicuraTabInbound();
-                infoCutoff = leggiCutoffBaiaCorrente();
-                if (infoCutoff) cacheCutoffPerBaia.set(baia.doorNumber, infoCutoff.cutoff);
-            }
-            if (!infoCutoff) continue;
-            aggiungiAlGruppo(infoCutoff.cutoff, baia.doorNumber);
-        }
+
         if (!trovatoQualcosa) {
             panelBody.innerHTML = '<div class="tnt-empty">Nessun camion/baia trovato</div>';
             return;
