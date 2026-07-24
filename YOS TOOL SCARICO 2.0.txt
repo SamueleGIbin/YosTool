@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.3
+// @version      2.4
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -242,6 +242,24 @@
         return null;
     }
 
+    function simulaClickReale(elemento) {
+        if (!elemento) return;
+        const rect = elemento.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        const opzioniBase = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0 };
+        // Alcune interfacce (specie quelle basate su gestione di puntatore/drag come questa,
+        // vedi "ui-draggable" nel markup delle baie) non reagiscono ad un semplice evento
+        // "click" sintetico senza la sequenza completa di eventi che un click reale del mouse
+        // genera. Replichiamo l'intera sequenza con coordinate reali sull'elemento.
+        ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((tipo) => {
+            try {
+                const EventCtor = tipo.indexOf("pointer") === 0 && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
+                elemento.dispatchEvent(new EventCtor(tipo, opzioniBase));
+            } catch (e) {}
+        });
+    }
+
     async function elaboraCodaVerificaBaie() {
         if (codaInLavorazione || codaVerificaBaie.length === 0) return;
         codaInLavorazione = true;
@@ -260,7 +278,7 @@
             const wrapper = trovaElementoBaiaPerNumero(voce.doorNumber);
             if (!wrapper) { codaVerificaBaie.push(voce); codaInLavorazione = false; return; }
             const baiaPrecedente = baiaSelezionata;
-            wrapper.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            simulaClickReale(wrapper);
             await new Promise((r) => setTimeout(r, 900));
             assicuraTabInbound();
             await new Promise((r) => setTimeout(r, 500));
@@ -287,7 +305,7 @@
             }
             if (baiaPrecedente && baiaPrecedente !== voce.doorNumber) {
                 const wrapperPrecedente = trovaElementoBaiaPerNumero(baiaPrecedente);
-                if (wrapperPrecedente) wrapperPrecedente.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+                if (wrapperPrecedente) simulaClickReale(wrapperPrecedente);
             }
         } catch (e) {}
         codaInLavorazione = false;
