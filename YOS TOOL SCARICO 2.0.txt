@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -232,7 +232,7 @@
         { nome: "Filiali per Sud", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 45, codici: ["ISV", "IOE", "PRG"] },
         { nome: "Import Prima Downgradato", turno: "Primo Shift", cutoffOre: 23, cutoffMin: 45, codici: ["HNJ", "DNG*", "DFT*", "BCN", "ECL", "LUG"] },
         { nome: "Filiali per Nord Mix Italia", turno: "Primo Shift", cutoffOre: 23, cutoffMin: 45, codici: ["CUF", "OS3", "IBU", "IPO", "ICM", "RNV", "ILJ", "QVA", "QAL", "BEA", "BRG", "MZ1", "GOA", "OSO", "B8Y", "M1S", "TO1", "ZD1", "MIL"] },
-        { nome: "Filiali per Export", turno: "Secondo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["VBS", "MM1", "VE1", "IBD", "REM", "BO1", "QPA", "VRN", "MDA", "PMF", "IIM"] },
+        { nome: "Filiali per Export", turno: "Secondo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["VBS", "MM1", "VE1", "IBD", "REM", "BO1", "QPA", "VRN", "MDA", "PMF", "IIM", "B7Q"] },
         { nome: "Clienti International", turno: "Primo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["LIVA", "GEWI", "MASE", "APLE", "UFAL", "GDEC"] },
         { nome: "Filiali Divisione per 07", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["BRG", "IPO", "MZ1", "IBU", "TO1", "MM1", "VRN", "VNZ", "TV1", "VE1"] },
         { nome: "Import Seconda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH", "KCW"] },
