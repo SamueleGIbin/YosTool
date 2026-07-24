@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -117,7 +117,16 @@
             const doorNumber = porta && porta.doorName;
             if (!doorNumber) return;
             const unit = porta.unitDTO;
-            if (porta.status !== "OCCUPIED" || !unit) {
+            // In precedenza qui si controllava porta.status !== "OCCUPIED": ma la stessa baia,
+            // con lo stesso camion ancora fisicamente presente, può passare per altri stati
+            // (es. buffer, parzialmente scaricato — vedi classi "buffer-unit
+            // partiallyloaded_outline" nel DOM) che l'API NON riporta come "OCCUPIED" pur
+            // avendo ancora un unitDTO valido agganciato alla baia. Con il controllo sullo
+            // status, ogni cambio di stato del genere cancellava arrivi[doorNumber] (incluso
+            // l'orario reale di arrivo), facendo tornare "Orario Arrivo Camion" a N/A e
+            // perdendo per sempre il dato originale. L'unica condizione che deve davvero
+            // svuotare la baia è l'assenza del mezzo (nessun unitDTO / unitId).
+            if (!unit || !unit.unitId) {
                 if (arrivi[doorNumber]) {
                     delete arrivi[doorNumber];
                     cacheCutoffPerBaia.delete(doorNumber);
@@ -215,8 +224,20 @@
                 unitVerificatiCutoff.add(voce.unitId);
             } else {
                 voce.tentativi = (voce.tentativi || 0) + 1;
-                if (voce.tentativi < 3) codaVerificaBaie.push(voce);
-                else unitVerificatiCutoff.add(voce.unitId);
+                // Non segniamo mai un camion come "verificato" senza aver davvero ottenuto un
+                // cutoff: farlo lo farebbe sparire per sempre dall'orologio pur non avendo
+                // nessun dato su di lui. Dopo qualche tentativo ravvicinato rallentiamo
+                // (ributtandolo in coda più avanti, non subito) invece di arrenderci.
+                if (voce.tentativi <= 5) {
+                    codaVerificaBaie.push(voce);
+                } else {
+                    setTimeout(() => {
+                        if (caricaArriviBaia()[voce.doorNumber]?.unitId === voce.unitId) {
+                            voce.tentativi = 0;
+                            codaVerificaBaie.push(voce);
+                        }
+                    }, 30000);
+                }
             }
             if (baiaPrecedente && baiaPrecedente !== voce.doorNumber) {
                 const wrapperPrecedente = trovaElementoBaiaPerNumero(baiaPrecedente);
@@ -253,7 +274,7 @@
         { nome: "Filiali per Sud", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 45, codici: ["ISV", "IOE", "PRG"] },
         { nome: "Import Prima Downgradato", turno: "Primo Shift", cutoffOre: 23, cutoffMin: 45, codici: ["HNJ", "DNG*", "DFT*", "BCN", "ECL", "LUG"] },
         { nome: "Filiali per Nord Mix Italia", turno: "Primo Shift", cutoffOre: 23, cutoffMin: 45, codici: ["CUF", "OS3", "IBU", "IPO", "ICM", "RNV", "ILJ", "QVA", "QAL", "BEA", "BRG", "MZ1", "GOA", "OSO", "B8Y", "M1S", "TO1", "ZD1", "MIL"] },
-        { nome: "Filiali per Export", turno: "Secondo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["VBS", "MM1", "VE1", "IBD", "REM", "BO1", "QPA", "VRN", "MDA", "PMF", "IIM"] },
+        { nome: "Filiali per Export", turno: "Secondo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["VBS", "MM1", "VE1", "IBD", "REM", "BO1", "B7Q", "QPA", "VRN", "MDA", "PMF", "IIM"] },
         { nome: "Clienti International", turno: "Primo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["LIVA", "GEWI", "MASE", "APLE", "UFAL", "GDEC"] },
         { nome: "Filiali Divisione per 07", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["BRG", "IPO", "MZ1", "IBU", "TO1", "MM1", "VRN", "VNZ", "TV1", "VE1"] },
         { nome: "Import Seconda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH", "KCW"] },
