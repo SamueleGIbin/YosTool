@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.3
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -83,9 +83,36 @@
                     estimatedArrival: m.estimatedArrival,
                     actualArrival: m.actualArrival,
                     movementName: m.movementName,
-                    tripTourDescription: m.trip ? m.trip.tripTourDescription : ""
+                    tripTourDescription: m.trip ? m.trip.tripTourDescription : "",
+                    vistoIl: Date.now()
                 });
             });
+        });
+    }
+
+    // I due registri sopra (cacheMovimentiPerUnit, registroTripConosciuti) alimentano le
+    // Fonti 4 e 5 del pannello "Scarico" — quelle che mostrano un camion "(CODICE)" senza
+    // baia assegnata, prima ancora che sia fisicamente arrivato. Servono per non perdere
+    // camion come MV9 (mai transitati per una baia), ma non venivano MAI svuotati: nel giro
+    // di un turno intero accumulano ogni camion mai visto, anche quelli arrivati e ripartiti
+    // da ore, finendo per intasare il pannello di voci storiche e irrilevanti — è quello che
+    // hai visto con "Import di Prima (137)". Una volta che un camion è così vecchio da non
+    // poter più essere realisticamente in transito, lo togliamo dal registro.
+    const FINESTRA_CONSERVAZIONE_SENZA_BAIA_MS = 16 * 60 * 60 * 1000; // 16 ore
+    function pulisciRegistriSenzaBaia() {
+        const ora = Date.now();
+        cacheMovimentiPerUnit.forEach((mov, unitId) => {
+            const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
+            const riferimento = arrivoIso ? new Date(arrivoIso).getTime() : mov.vistoIl;
+            if (!riferimento || isNaN(riferimento) || (ora - riferimento) > FINESTRA_CONSERVAZIONE_SENZA_BAIA_MS) {
+                cacheMovimentiPerUnit.delete(unitId);
+            }
+        });
+        registroTripConosciuti.forEach((voce, chiave) => {
+            const riferimento = voce.arrivoIso ? new Date(voce.arrivoIso).getTime() : voce.vistoIl;
+            if (!riferimento || isNaN(riferimento) || (ora - riferimento) > FINESTRA_CONSERVAZIONE_SENZA_BAIA_MS) {
+                registroTripConosciuti.delete(chiave);
+            }
         });
     }
 
@@ -137,7 +164,19 @@
             const unitId = unit.unitId;
             const esistente = arrivi[doorNumber];
             const cambiaUnit = !esistente || esistente.unitId !== unitId;
-            if (cambiaUnit || unit.currentAction === "START_UNLOADING") {
+            // Cattura l'orario reale di arrivo SOLO quando il mezzo è nuovo alla baia o quando
+            // la sua azione TRANSITA per la prima volta in START_UNLOADING/LOCATION_ASSIGNED
+            // (non ogni volta che l'API ripete lo stesso stato). In precedenza la condizione
+            // era "unit.currentAction === START_UNLOADING", vera ad OGNI polling per tutta la
+            // durata dello scarico: se il timestamp del backend si aggiornava anche di poco ad
+            // ogni giro, orarioCambiato diventava sempre true, invalidando la cache e
+            // rimettendo in coda di verifica OGNI baia occupata ogni ~5 secondi — la coda non
+            // riusciva più a smaltire nulla e nessuna baia reale veniva più mostrata (tutto
+            // finiva tra parentesi, cioè nella coda "senza baia" delle Fonti 4/5).
+            const azionePrecedente = esistente && esistente.action;
+            const transitaAdAzioneTracciata = (unit.currentAction === "START_UNLOADING" || unit.currentAction === "LOCATION_ASSIGNED")
+                && azionePrecedente !== unit.currentAction;
+            if (cambiaUnit || transitaAdAzioneTracciata) {
                 let orario;
                 if (unit.currentAction === "START_UNLOADING" && (unit.updatedDateTimestamp || unit.updatedDate)) {
                     orario = unit.updatedDateTimestamp || unit.updatedDate;
@@ -159,11 +198,18 @@
                     cacheCutoffPerBaia.delete(doorNumber);
                     unitVerificatiCutoff.delete(String(unitId));
                 }
-                arrivi[doorNumber] = { unitId: unitId, orario: orario };
+                arrivi[doorNumber] = { unitId: unitId, orario: orario, action: unit.currentAction };
                 modificato = true;
 
                 if (cambiaUnit) registraInStoricoReport(doorNumber, unitId, orario);
                 if (categoriaBaia(doorNumber) === "Scarico" && (cambiaUnit || orarioCambiato)) accodaVerificaBaia(doorNumber, unitId);
+            } else if (esistente && esistente.action !== unit.currentAction) {
+                // Azione cambiata ma non verso uno stato che porta un nuovo orario reale
+                // (es. da START_UNLOADING a un altro stato successivo): aggiorniamo solo il
+                // campo "action" per tenere aggiornata la transizione, senza toccare l'orario
+                // né invalidare le cache già valide.
+                arrivi[doorNumber] = { unitId: unitId, orario: esistente.orario, action: unit.currentAction };
+                modificato = true;
             }
         });
         if (modificato) salvaArriviBaia(arrivi);
@@ -1364,5 +1410,6 @@
     setInterval(aggiornaPannelloOutbound, 15000);
     setInterval(aggiornaPannelloScaricoSeAperto, 15000);
     setInterval(pulisciStoricoVecchio, 60 * 60 * 1000);
+    setInterval(pulisciRegistriSenzaBaia, 10 * 60 * 1000);
     setInterval(elaboraCodaVerificaBaie, 4000);
 })();
