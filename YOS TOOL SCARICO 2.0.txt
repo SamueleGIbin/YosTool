@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.4
+// @version      2.5
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -1018,7 +1018,16 @@
             if (senzaBaiaAssegnata && diffMinuti < 150 && diffMinuti >= 0) return;
             const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
             const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
-            const chiave = risultato.cat.nome + "|" + hh + ":" + mm;
+            // BUG CORRETTO: la chiave doveva includere anche la DATA del cutoff, non solo
+            // l'ora. Ogni categoria ricorre ogni giorno alla stessa ora (es. Import di Prima
+            // sempre alle 21:30): senza la data, il cutoff di OGGI alle 21:30 e quello di
+            // DOMANI alle 21:30 finivano nello stesso gruppo, che mostrava l'orario e lo stato
+            // "in ritardo" del primo camion capitato in quello slot — anche se magari era di
+            // un altro giorno. Risultato: bucket enormi (137, 62...) che mischiavano camion di
+            // più giorni diversi, e camion in realtà ancora lontani segnati come scaduti solo
+            // perché raggruppati insieme a uno stesso slot orario di un giorno già passato.
+            const dataChiave = risultato.cutoffDate.getFullYear() + "-" + String(risultato.cutoffDate.getMonth() + 1).padStart(2, "0") + "-" + String(risultato.cutoffDate.getDate()).padStart(2, "0");
+            const chiave = risultato.cat.nome + "|" + dataChiave + " " + hh + ":" + mm;
             if (!gruppi.has(chiave)) gruppi.set(chiave, { nome: risultato.cat.nome, turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
             gruppi.get(chiave).baie.push(risultato.ritardo ? infoBaia + "*" : infoBaia);
         }
@@ -1184,12 +1193,14 @@
             gruppo.voci.forEach((info) => {
                 const hh = String(info.orario.getHours()).padStart(2, "0");
                 const mm = String(info.orario.getMinutes()).padStart(2, "0");
+                const stessoGiornoDiOggi = info.orario.getFullYear() === ora.getFullYear() && info.orario.getMonth() === ora.getMonth() && info.orario.getDate() === ora.getDate();
+                const etichettaOrario = stessoGiornoDiOggi ? (hh + ':' + mm) : (String(info.orario.getDate()).padStart(2, "0") + "/" + String(info.orario.getMonth() + 1).padStart(2, "0") + " " + hh + ':' + mm);
                 const listaBaie = info.baie.filter(Boolean).join(", ");
                 if (listaBaie.indexOf("*") !== -1) presenteAsterisco = true;
                 html += '<div class="tnt-card ' + f.classe + '">'
                     + '<div class="tnt-card-row">'
                     + '<span class="tnt-card-title">' + info.nome + ' (' + info.baie.length + ')</span>'
-                    + '<span class="tnt-badge">' + hh + ':' + mm + '</span>'
+                    + '<span class="tnt-badge">' + etichettaOrario + '</span>'
                     + '</div>'
                     + '<div class="tnt-card-sub">Baie: ' + listaBaie + '</div>'
                     + '</div>';
