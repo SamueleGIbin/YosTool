@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.5
+// @version      2.6
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -59,12 +59,6 @@
 
     const cacheMovimentiPerUnit = new Map();
     const cacheCutoffPerBaia = new Map();
-    // Registro dei camion "visti" leggendo il pannello Trip Details ovunque compaia in pagina
-    // (anche fuori dal contesto di una baia fisica, es. schermata di assegnazione baia).
-    // Non dipende dall'intercettazione dell'API dei movimenti: cattura i dati appena il
-    // pannello diventa visibile, così un camion arrivato ma non ancora agganciato ad una
-    // baia (e magari sparito dai widget "scheduled") resta comunque tracciato.
-    const registroTripConosciuti = new Map();
 
     function sembraListaMovimenti(dati) {
         return Array.isArray(dati) && dati.length > 0 && dati[0] && typeof dati[0] === "object"
@@ -90,28 +84,19 @@
         });
     }
 
-    // I due registri sopra (cacheMovimentiPerUnit, registroTripConosciuti) alimentano le
-    // Fonti 4 e 5 del pannello "Scarico" — quelle che mostrano un camion "(CODICE)" senza
-    // baia assegnata, prima ancora che sia fisicamente arrivato. Servono per non perdere
-    // camion come MV9 (mai transitati per una baia), ma non venivano MAI svuotati: nel giro
-    // di un turno intero accumulano ogni camion mai visto, anche quelli arrivati e ripartiti
-    // da ore, finendo per intasare il pannello di voci storiche e irrilevanti — è quello che
-    // hai visto con "Import di Prima (137)". Una volta che un camion è così vecchio da non
-    // poter più essere realisticamente in transito, lo togliamo dal registro.
-    const FINESTRA_CONSERVAZIONE_SENZA_BAIA_MS = 16 * 60 * 60 * 1000; // 16 ore
+    // cacheMovimentiPerUnit resta come cache di supporto: quando un camion è fisicamente in
+    // baia o in un parcheggio (unica fonte usata ora dal pannello), serve a recuperarne
+    // l'origine/orario programmato intercettati dall'API dei movimenti. Va comunque svuotata
+    // periodicamente: un unitId molto vecchio e mai più visto in nessuna baia/parcheggio non
+    // serve più a nulla ed è inutile tenerlo in memoria per l'intero turno.
+    const FINESTRA_CONSERVAZIONE_CACHE_MOVIMENTI_MS = 16 * 60 * 60 * 1000; // 16 ore
     function pulisciRegistriSenzaBaia() {
         const ora = Date.now();
         cacheMovimentiPerUnit.forEach((mov, unitId) => {
             const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
             const riferimento = arrivoIso ? new Date(arrivoIso).getTime() : mov.vistoIl;
-            if (!riferimento || isNaN(riferimento) || (ora - riferimento) > FINESTRA_CONSERVAZIONE_SENZA_BAIA_MS) {
+            if (!riferimento || isNaN(riferimento) || (ora - riferimento) > FINESTRA_CONSERVAZIONE_CACHE_MOVIMENTI_MS) {
                 cacheMovimentiPerUnit.delete(unitId);
-            }
-        });
-        registroTripConosciuti.forEach((voce, chiave) => {
-            const riferimento = voce.arrivoIso ? new Date(voce.arrivoIso).getTime() : voce.vistoIl;
-            if (!riferimento || isNaN(riferimento) || (ora - riferimento) > FINESTRA_CONSERVAZIONE_SENZA_BAIA_MS) {
-                registroTripConosciuti.delete(chiave);
             }
         });
     }
@@ -202,7 +187,8 @@
                 modificato = true;
 
                 if (cambiaUnit) registraInStoricoReport(doorNumber, unitId, orario);
-                if (categoriaBaia(doorNumber) === "Scarico" && (cambiaUnit || orarioCambiato)) accodaVerificaBaia(doorNumber, unitId);
+                const catPerVerifica = categoriaBaia(doorNumber);
+                if ((catPerVerifica === "Scarico" || catPerVerifica === "Parcheggio") && (cambiaUnit || orarioCambiato)) accodaVerificaBaia(doorNumber, unitId);
             } else if (esistente && esistente.action !== unit.currentAction) {
                 // Azione cambiata ma non verso uno stato che porta un nuovo orario reale
                 // (es. da START_UNLOADING a un altro stato successivo): aggiorniamo solo il
@@ -588,15 +574,6 @@
                         }
                         if (arrivo) {
                             risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo, arrivoPortaReale);
-                            // Registrazione indipendente dalla baia: catturiamo il camion appena
-                            // il suo Trip Details è visibile in QUALSIASI schermata (anche quella
-                            // di assegnazione baia, dove il camion non ha ancora una baia fisica).
-                            const chiaveTrip = tripId || (codiceOrigine + "|" + testoArrivo);
-                            registroTripConosciuti.set(chiaveTrip, {
-                                origine: codiceOrigine,
-                                arrivoIso: arrivo.toISOString(),
-                                vistoIl: Date.now()
-                            });
                         }
                     }
                 }
@@ -694,7 +671,13 @@
             const span = numEl.querySelector("span");
             if (!span) return;
             const doorNumber = span.textContent.trim();
-            if (!doorNumber || categoriaBaia(doorNumber) !== "Scarico") return;
+            if (!doorNumber) return;
+            // Oltre alle baie numeriche di scarico, includiamo anche i parcheggi (es. "P312"):
+            // un camion in attesa in un parcheggio è comunque fisicamente tracciabile tramite
+            // la stessa API/DOM delle baie, quindi va trattato come fonte "attuale" allo stesso
+            // modo — non come voce presunta/schedulata.
+            const cat = categoriaBaia(doorNumber);
+            if (cat !== "Scarico" && cat !== "Parcheggio") return;
             const wrapper = numEl.closest('[id^="unit_"]');
             if (!wrapper) return;
             const container = wrapper.querySelector('[id^="container_"].unit-assigned');
@@ -1002,20 +985,11 @@
         const gruppi = new Map();
         const ora = new Date();
         let trovatoQualcosa = false;
-        const firmeAggiunte = new Set();
         function aggiungiAlGruppo(risultato, infoBaia) {
             const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
             if (diffMinuti > SOGLIA_SCARICO_MINUTI) return;
             const senzaBaiaAssegnata = /^\(.*\)$/.test(infoBaia);
-            // Un camion senza baia assegnata e senza orario di arrivo reale (arrivoPortaReale
-            // sconosciuto) non può MAI essere marcato "in ritardo" da calcolaCutoffPerCodice
-            // (quel calcolo richiede l'orario reale), quindi resta sul suo cutoff base/originale
-            // (es. 21:30 Import di Prima). Va bene così: quando non sappiamo se è in ritardo,
-            // non dobbiamo presumerlo e farlo sparire. Il filtro sotto va quindi applicato solo
-            // per nascondere rumore di camion ancora lontani (>150min, non urgenti); non deve
-            // MAI nascondere un camion già scaduto/vicino al cutoff (diffMinuti < 150 incluso
-            // negativo = già in ritardo), perché è esattamente il caso più critico da mostrare.
-            if (senzaBaiaAssegnata && diffMinuti < 150 && diffMinuti >= 0) return;
+            if (senzaBaiaAssegnata) return; // non dovrebbe più accadere: nessuna fonte produce più voci senza baia/parcheggio reale
             const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
             const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
             // BUG CORRETTO: la chiave doveva includere anche la DATA del cutoff, non solo
@@ -1031,24 +1005,18 @@
             if (!gruppi.has(chiave)) gruppi.set(chiave, { nome: risultato.cat.nome, turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
             gruppi.get(chiave).baie.push(risultato.ritardo ? infoBaia + "*" : infoBaia);
         }
-        function aggiungiSeNuovo(risultato, infoBaia, firma) {
-            if (firma) {
-                if (firmeAggiunte.has(firma)) return;
-                firmeAggiunte.add(firma);
-            }
-            aggiungiAlGruppo(risultato, infoBaia);
-        }
 
-        // --- Fonte 1: baie di scarico fisicamente occupate (dato dalla docking-door API,
-        // cioè il camion è realmente "entrato" in baia). È la fonte più affidabile perché
-        // non dipende da nessun widget del DOM.
+        // --- Fonte 1: baie di scarico E parcheggi fisicamente occupati (dato dalla
+        // docking-door API, cioè il camion è realmente "entrato" in baia o in un parcheggio).
+        // È volutamente l'UNICA fonte usata: rispecchia solo la situazione ATTUALE. Un camion
+        // non ancora arrivato in nessuna baia/parcheggio semplicemente non compare — niente
+        // più voci "presunte" da widget schedulati o da registri accumulati nel tempo, che
+        // erano la causa dei dati vecchi di giorni e dei conteggi gonfiati.
         const baie = trovaBaieScaricoOccupate();
         if (baie.length > 0) trovatoQualcosa = true;
         const arriviCorrenti = caricaArriviBaia();
-        const unitDockatiVisti = new Set();
         for (const baia of baie) {
             const voceBaia = arriviCorrenti[baia.doorNumber];
-            if (voceBaia && voceBaia.unitId) unitDockatiVisti.add(String(voceBaia.unitId));
             let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
             if (!infoCutoff) {
                 const cutoffCachato = cacheCutoffPerBaia.get(baia.doorNumber);
@@ -1060,102 +1028,8 @@
                 if (infoCutoff) cacheCutoffPerBaia.set(baia.doorNumber, infoCutoff.cutoff);
             }
             if (!infoCutoff) continue;
-            if (voceBaia && voceBaia.unitId) firmeAggiunte.add("unit:" + voceBaia.unitId);
             aggiungiAlGruppo(infoCutoff.cutoff, baia.doorNumber);
         }
-
-        // --- Fonte 2: widget DOM "schedule_units" (camion ancora schedulati, non arrivati).
-        const scheduledElements = document.querySelectorAll(".schedule_units");
-        if (scheduledElements.length > 0) trovatoQualcosa = true;
-        const movimentiScheduledVisti = new Set();
-        scheduledElements.forEach((el) => {
-            const idEl = el.querySelector(".scheduled-movement-id");
-            const originEl = el.querySelector(".scheduled-orgin");
-            const arrivalEl = el.querySelector(".scheduled-sta");
-            if (!originEl || !arrivalEl) return;
-            const movementId = idEl ? idEl.textContent.trim() : null;
-            if (movementId) {
-                if (movimentiScheduledVisti.has(movementId)) return;
-                movimentiScheduledVisti.add(movementId);
-            }
-            const codiceOrigine = estraiCodiceGrezzo(originEl);
-            const testoArrivo = arrivalEl.textContent.trim();
-            if (!codiceOrigine || !testoArrivo || testoArrivo.toUpperCase().includes("N/A")) return;
-            const arrivo = parseDataOraSlash(testoArrivo);
-            if (!arrivo) return;
-            const risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo);
-            if (!risultato) return;
-            aggiungiSeNuovo(risultato, "(" + codiceOrigine + ")", codiceOrigine + "|" + arrivo.getTime());
-        });
-
-        // --- Fonte 3: widget DOM "arrival_units" (camion in arrivo / appena arrivati).
-        const unitElements = document.querySelectorAll(".arrival_units");
-        if (unitElements.length > 0) trovatoQualcosa = true;
-        unitElements.forEach((el) => {
-            const originEl = el.querySelector(".inbound-origin-en-route, .inbound-origin");
-            const arrivalEl = el.querySelector(".arrival-time-en-route, .arrival-time");
-            if (!originEl || !arrivalEl) return;
-            const codiceOrigine = estraiCodiceGrezzo(originEl);
-            const testoArrivo = arrivalEl.textContent.trim();
-            if (!codiceOrigine || testoArrivo.toUpperCase().includes("N/A")) return;
-            const arrivo = parseDataOraSlash(testoArrivo);
-            if (!arrivo) return;
-            const doorEl = el.querySelector(".door_number, .west_door_number, .east_door_number, .reverse_door_number");
-            const doorNumberTesto = doorEl ? doorEl.textContent.trim() : null;
-            let arrivoPortaReale = null;
-            if (doorNumberTesto) {
-                const voceBaia = arriviCorrenti[doorNumberTesto];
-                if (voceBaia && voceBaia.orario) {
-                    const d = new Date(voceBaia.orario);
-                    if (!isNaN(d.getTime())) arrivoPortaReale = d;
-                }
-            }
-            const risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo, arrivoPortaReale);
-            if (!risultato) return;
-            aggiungiSeNuovo(risultato, doorNumberTesto || "(" + codiceOrigine + ")", codiceOrigine + "|" + arrivo.getTime());
-        });
-
-        // --- Fonte 4: registro persistente dei movimenti (cacheMovimentiPerUnit). Viene
-        // popolato non appena l'API dei movimenti restituisce un camion e NON viene mai
-        // svuotato finché quel camion non entra fisicamente in una baia (Fonte 1). A
-        // differenza delle Fonti 2 e 3, che leggono il DOM e possono sparire quando TNT toglie
-        // dalla sua vista "schedulati" un camion molto in ritardo pur non avendolo ancora
-        // processato, questa fonte resta valida per tutta la sessione. È il modo per non
-        // dipendere solo dai widget "scheduled": ogni camion mai visto — sia lato movimenti
-        // sia lato ingresso in baia — resta comunque agganciato all'orologio. Un camion già
-        // contato in Fonte 1 (già in baia) viene saltato per non duplicarlo.
-        cacheMovimentiPerUnit.forEach((mov, unitId) => {
-            if (!mov || !mov.origin) return;
-            if (unitDockatiVisti.has(String(unitId))) return;
-            if (firmeAggiunte.has("unit:" + unitId)) return;
-            const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
-            if (!arrivoIso) return;
-            const arrivo = new Date(arrivoIso);
-            if (isNaN(arrivo.getTime())) return;
-            const firma = mov.origin + "|" + arrivo.getTime();
-            if (firmeAggiunte.has(firma)) return;
-            const risultato = calcolaCutoffPerCodice(mov.origin, arrivo, null);
-            if (!risultato) return;
-            trovatoQualcosa = true;
-            aggiungiSeNuovo(risultato, "(" + mov.origin + ")", firma);
-        });
-
-        // --- Fonte 5: registro scritto leggendo il pannello Trip Details ogni volta che è
-        // visibile (vedi processaTripDetails), non solo quando il camion è agganciato a una
-        // baia o presente nella lista movimenti intercettata. Copre proprio il caso di un
-        // camion visto solo nella schermata di assegnazione baia, mai apparso né nei widget
-        // "scheduled/arrival" né nella risposta dei movimenti.
-        registroTripConosciuti.forEach((voce, chiaveTrip) => {
-            if (!voce || !voce.origine || !voce.arrivoIso) return;
-            const arrivo = new Date(voce.arrivoIso);
-            if (isNaN(arrivo.getTime())) return;
-            const firma = voce.origine + "|" + arrivo.getTime();
-            if (firmeAggiunte.has(firma)) return;
-            const risultato = calcolaCutoffPerCodice(voce.origine, arrivo, null);
-            if (!risultato) return;
-            trovatoQualcosa = true;
-            aggiungiSeNuovo(risultato, "(" + voce.origine + ")", firma);
-        });
 
         if (!trovatoQualcosa) {
             panelBody.innerHTML = '<div class="tnt-empty">Nessun camion/baia trovato</div>';
