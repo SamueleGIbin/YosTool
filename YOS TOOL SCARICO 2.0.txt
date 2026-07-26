@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      3.2
+// @version      3.3
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -98,6 +98,18 @@
         unitGiaScaricati.forEach((vistoIl, unitId) => {
             if (!vistoIl || (ora - vistoIl) > FINESTRA_CONSERVAZIONE_CACHE_MOVIMENTI_MS) unitGiaScaricati.delete(unitId);
         });
+        const arrivi = caricaArriviBaia();
+        let modificato = false;
+        Object.keys(arrivi).forEach((doorNumber) => {
+            const voce = arrivi[doorNumber];
+            if (!voce || !voce.unitId || String(voce.unitId).indexOf("TRIP_") !== 0) return;
+            const riferimento = voce.orario ? new Date(voce.orario).getTime() : null;
+            if (!riferimento || isNaN(riferimento) || (ora - riferimento) > FINESTRA_CONSERVAZIONE_CACHE_MOVIMENTI_MS) {
+                delete arrivi[doorNumber];
+                modificato = true;
+            }
+        });
+        if (modificato) salvaArriviBaia(arrivi);
     }
 
     function calcolaCutoffDaCacheMovimenti(doorNumber) {
@@ -546,6 +558,7 @@
                         }
                     }
                 }
+                if (baiaSelezionata && codiceOrigine) registraArrivoDaTripDetailsSeMancante(baiaSelezionata, codiceOrigine, tripId, testoActualArrivo, risultato);
                 aggiornaRigaArrivoECountdown(contenitore, risultato);
                 if (risultato && baiaSelezionata) cacheCutoffPerBaia.set(baiaSelezionata, risultato);
                 if (!origineEl || !arrivoEl) return;
@@ -657,6 +670,35 @@
     }
     function salvaArriviBaia(dati) {
         try { localStorage.setItem(STORAGE_KEY_ARRIVI, JSON.stringify(dati)); } catch (e) {}
+    }
+
+    function registraArrivoDaTripDetailsSeMancante(doorNumber, codiceOrigine, tripId, testoActualArrivo, risultato) {
+        if (!doorNumber) return;
+        const cat = categoriaBaia(doorNumber);
+        if (cat !== "Scarico" && cat !== "Parcheggio") return;
+        if (!testoActualArrivo || testoActualArrivo.toUpperCase().includes("N/A")) return;
+        const dataActual = parseDataOraSlash(testoActualArrivo);
+        if (!dataActual) return;
+        const orarioFallback = dataActual.toISOString();
+        const idFallback = "TRIP_" + (tripId || (codiceOrigine + "_" + orarioFallback));
+        const arrivi = caricaArriviBaia();
+        const esistente = arrivi[doorNumber];
+        if (esistente && String(esistente.unitId).indexOf("TRIP_") !== 0) return;
+        if (esistente && esistente.unitId === idFallback) return;
+        arrivi[doorNumber] = { unitId: idFallback, orario: orarioFallback, action: "TRIP_DETAILS_FALLBACK" };
+        salvaArriviBaia(arrivi);
+        cacheMovimentiPerUnit.set(idFallback, {
+            origin: codiceOrigine,
+            destination: null,
+            scheduleArrival: null,
+            estimatedArrival: null,
+            actualArrival: orarioFallback,
+            movementName: tripId || null,
+            tripTourDescription: "",
+            vistoIl: Date.now()
+        });
+        if (risultato) cacheCutoffPerBaia.set(doorNumber, risultato);
+        registraInStoricoReport(doorNumber, idFallback, orarioFallback);
     }
 
     function caricaStoricoReport() {
@@ -960,6 +1002,19 @@
         return elenco;
     }
 
+    function elencoParcheggioScaricoOccupati() {
+        const arrivi = caricaArriviBaia();
+        const risultati = [];
+        Object.keys(arrivi).forEach((doorNumber) => {
+            const voce = arrivi[doorNumber];
+            if (!voce || !voce.unitId) return;
+            if (categoriaBaia(doorNumber) !== "Parcheggio") return;
+            if (unitGiaScaricati.has(String(voce.unitId))) return;
+            risultati.push(doorNumber);
+        });
+        return risultati;
+    }
+
     function confrontaBaie(a, b) {
         const aPark = /^P/i.test(a);
         const bPark = /^P/i.test(b);
@@ -1027,6 +1082,13 @@
             const voce = arriviAttuali[n];
             return !voce || !voce.unitId;
         });
+
+        const parcheggiOccupati = elencoParcheggioScaricoOccupati().sort(confrontaBaie);
+        html += '<div class="tnt-group-label">Parcheggio scarico (' + parcheggiOccupati.length + ')</div>';
+        html += '<div class="tnt-card tnt-card-ambra"><div class="tnt-card-sub">'
+            + (parcheggiOccupati.length > 0 ? parcheggiOccupati.join(", ") : "Nessun mezzo in parcheggio")
+            + '</div></div>';
+
         html += '<div class="tnt-group-label">Baie libere (' + baieLibere.length + ')</div>';
         html += '<div class="tnt-card tnt-card-verde"><div class="tnt-card-sub">'
             + (baieLibere.length > 0 ? baieLibere.join(", ") : "Nessuna baia libera")
