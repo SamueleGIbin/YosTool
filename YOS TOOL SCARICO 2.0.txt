@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.9
+// @version      3.0
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -59,6 +59,7 @@
 
     const cacheMovimentiPerUnit = new Map();
     const cacheCutoffPerBaia = new Map();
+    const unitGiaScaricati = new Map();
 
     function sembraListaMovimenti(dati) {
         return Array.isArray(dati) && dati.length > 0 && dati[0] && typeof dati[0] === "object"
@@ -98,6 +99,9 @@
             if (!riferimento || isNaN(riferimento) || (ora - riferimento) > FINESTRA_CONSERVAZIONE_CACHE_MOVIMENTI_MS) {
                 cacheMovimentiPerUnit.delete(unitId);
             }
+        });
+        unitGiaScaricati.forEach((vistoIl, unitId) => {
+            if (!vistoIl || (ora - vistoIl) > FINESTRA_CONSERVAZIONE_CACHE_MOVIMENTI_MS) unitGiaScaricati.delete(unitId);
         });
     }
 
@@ -147,6 +151,11 @@
                 return;
             }
             const unitId = unit.unitId;
+            // Un camion visto in una baia numerica di Scarico è considerato "già passato in
+            // baia": se in seguito lo ritroviamo di nuovo in un parcheggio, è il rientro post-
+            // scarico (in attesa di ripartire), non un camion ancora da scaricare. Lo segniamo
+            // qui per poterlo escludere più avanti dal pannello quando riappare in parcheggio.
+            if (categoriaBaia(doorNumber) === "Scarico") unitGiaScaricati.set(String(unitId), Date.now());
             const esistente = arrivi[doorNumber];
             const cambiaUnit = !esistente || esistente.unitId !== unitId;
             // Cattura l'orario reale di arrivo SOLO quando il mezzo è nuovo alla baia o quando
@@ -328,7 +337,7 @@
         { nome: "Clienti International", turno: "Primo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["LIVA", "GEWI", "MASE", "APLE", "UFAL", "GDEC"] },
         { nome: "Filiali Divisione per 07", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["BRG", "IPO", "MZ1", "IBU", "TO1", "MM1", "VRN", "VNZ", "TV1", "VE1"] },
         { nome: "Import Seconda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH", "KCW"] },
-        { nome: "Hub 07 Nord", turno: "Secondo Shift", cutoffOre: 5, cutoffMin: 30, codici: ["BO2", "PD2", "FC5", "PSA", "ZRO"] },
+        { nome: "Hub 07 Nord", turno: "Secondo Shift", cutoffOre: 5, cutoffMin: 30, codici: ["BO2", "PD2", "FC5", "PSA", "ZRO","PSR"] },
         { nome: "Hub Export/Sud", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["AN6", "FIA", "NC3", "NT3", "GDEC", "COFR", "UFAL", "APLE"] },
         { nome: "Import Anticipi", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["LYS", "MRS", "NT3", "BA5"] }
     ];
@@ -997,7 +1006,6 @@
     function scansionaBaieScarico(panelBody) {
         const gruppi = new Map();
         const ora = new Date();
-        let trovatoQualcosa = false;
         function aggiungiAlGruppo(risultato, infoBaia) {
             const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
             if (diffMinuti > SOGLIA_SCARICO_MINUTI) return;
@@ -1026,10 +1034,10 @@
         // più voci "presunte" da widget schedulati o da registri accumulati nel tempo, che
         // erano la causa dei dati vecchi di giorni e dei conteggi gonfiati.
         const baie = trovaBaieScaricoOccupate();
-        if (baie.length > 0) trovatoQualcosa = true;
         const arriviCorrenti = caricaArriviBaia();
         for (const baia of baie) {
             const voceBaia = arriviCorrenti[baia.doorNumber];
+            if (categoriaBaia(baia.doorNumber) === "Parcheggio" && voceBaia && unitGiaScaricati.has(String(voceBaia.unitId))) continue;
             let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
             if (!infoCutoff) {
                 const cutoffCachato = cacheCutoffPerBaia.get(baia.doorNumber);
@@ -1044,17 +1052,30 @@
             aggiungiAlGruppo(infoCutoff.cutoff, baia.doorNumber);
         }
 
-        if (!trovatoQualcosa) {
-            panelBody.innerHTML = '<div class="tnt-empty">Nessun camion/baia trovato</div>';
-            return;
-        }
         renderPannelloScaricoConteggi(panelBody, gruppi);
     }
 
+    function elencoBaieScaricoComplete() {
+        const elenco = [];
+        for (let n = 101; n <= 107; n++) elenco.push(String(n));
+        for (let n = 10; n <= 14; n++) elenco.push(String(n));
+        for (let n = 201; n <= 207; n++) elenco.push(String(n));
+        for (let n = 601; n <= 609; n++) elenco.push(String(n));
+        for (let n = 501; n <= 509; n++) elenco.push(String(n));
+        return elenco;
+    }
+
     function confrontaBaie(a, b) {
-        // Ordine crescente per numero di baia (100 in su), asterisco '*' di ritardo ignorato
-        // ai fini del confronto. I parcheggi (es. "P312", senza numero puro) vanno in fondo,
-        // in ordine alfabetico tra loro.
+        // I parcheggi (es. "P312") vengono PRIMA, in ordine crescente tra loro: un camion
+        // ancora in parcheggio deve ancora essere spostato in baia, quindi ha priorità
+        // operativa rispetto a chi è già agganciato a una baia numerica. A seguire le baie
+        // numeriche in ordine crescente (100 in su). L'asterisco '*' di ritardo viene
+        // ignorato ai fini del confronto.
+        const aPark = /^P/i.test(a);
+        const bPark = /^P/i.test(b);
+        if (aPark && bPark) return parseInt(a.replace(/^P/i, ""), 10) - parseInt(b.replace(/^P/i, ""), 10);
+        if (aPark) return -1;
+        if (bPark) return 1;
         const na = parseInt(a, 10);
         const nb = parseInt(b, 10);
         const aNum = !isNaN(na);
@@ -1066,50 +1087,66 @@
     }
 
     function renderPannelloScaricoConteggi(panelBody, gruppi) {
-        if (gruppi.size === 0) {
-            panelBody.innerHTML = '<div class="tnt-empty">Nessuno scarico in scadenza</div>';
-            return;
-        }
-        const ora = new Date();
-        const voci = [...gruppi.entries()].sort((a, b) => a[1].orario.getTime() - b[1].orario.getTime());
-        const fasce = [
-            { chiave: "ritardo", etichetta: "In ritardo", classe: "tnt-card-rosso", test: (m) => m < 0 },
-            { chiave: "30", etichetta: "Entro 30 min", classe: "tnt-card-rosso", test: (m) => m <= 30 },
-            { chiave: "60", etichetta: "Entro 60 min", classe: "tnt-card-ambra", test: (m) => m <= 60 },
-            { chiave: "oltre", etichetta: "Successivi", classe: "tnt-card-ambra", test: () => true }
-        ];
-        const bucket = new Map();
-        voci.forEach(([chiave, info]) => {
-            const diffMinuti = (info.orario.getTime() - ora.getTime()) / 60000;
-            const fascia = fasce.find((f) => f.test(diffMinuti));
-            if (!bucket.has(fascia.chiave)) bucket.set(fascia.chiave, { fascia, voci: [] });
-            bucket.get(fascia.chiave).voci.push(info);
-        });
         let html = "";
-        let presenteAsterisco = false;
-        fasce.forEach((f) => {
-            const gruppo = bucket.get(f.chiave);
-            if (!gruppo || gruppo.voci.length === 0) return;
-            html += '<div class="tnt-group-label">' + f.etichetta + '</div>';
-            gruppo.voci.forEach((info) => {
-                const hh = String(info.orario.getHours()).padStart(2, "0");
-                const mm = String(info.orario.getMinutes()).padStart(2, "0");
-                const stessoGiornoDiOggi = info.orario.getFullYear() === ora.getFullYear() && info.orario.getMonth() === ora.getMonth() && info.orario.getDate() === ora.getDate();
-                const etichettaOrario = stessoGiornoDiOggi ? (hh + ':' + mm) : (String(info.orario.getDate()).padStart(2, "0") + "/" + String(info.orario.getMonth() + 1).padStart(2, "0") + " " + hh + ':' + mm);
-                const listaBaie = info.baie.filter(Boolean).sort(confrontaBaie).join(", ");
-                if (listaBaie.indexOf("*") !== -1) presenteAsterisco = true;
-                html += '<div class="tnt-card ' + f.classe + '">'
-                    + '<div class="tnt-card-row">'
-                    + '<span class="tnt-card-title">' + info.nome + ' (' + info.baie.length + ')</span>'
-                    + '<span class="tnt-badge">' + etichettaOrario + '</span>'
-                    + '</div>'
-                    + '<div class="tnt-card-sub">Baie: ' + listaBaie + '</div>'
-                    + '</div>';
+        if (gruppi.size === 0) {
+            html += '<div class="tnt-empty">Nessuno scarico in scadenza</div>';
+        } else {
+            const ora = new Date();
+            const voci = [...gruppi.entries()].sort((a, b) => a[1].orario.getTime() - b[1].orario.getTime());
+            const fasce = [
+                { chiave: "ritardo", etichetta: "In ritardo", classe: "tnt-card-rosso", test: (m) => m < 0 },
+                { chiave: "30", etichetta: "Entro 30 min", classe: "tnt-card-rosso", test: (m) => m <= 30 },
+                { chiave: "60", etichetta: "Entro 60 min", classe: "tnt-card-ambra", test: (m) => m <= 60 },
+                { chiave: "oltre", etichetta: "Successivi", classe: "tnt-card-ambra", test: () => true }
+            ];
+            const bucket = new Map();
+            voci.forEach(([chiave, info]) => {
+                const diffMinuti = (info.orario.getTime() - ora.getTime()) / 60000;
+                const fascia = fasce.find((f) => f.test(diffMinuti));
+                if (!bucket.has(fascia.chiave)) bucket.set(fascia.chiave, { fascia, voci: [] });
+                bucket.get(fascia.chiave).voci.push(info);
             });
-        });
-        if (presenteAsterisco) {
-            html += '<div class="tnt-footnote">* slittato al cutoff successivo per late arrival (meno di 150min di lavorazione disponibili)</div>';
+            let presenteAsterisco = false;
+            fasce.forEach((f) => {
+                const gruppo = bucket.get(f.chiave);
+                if (!gruppo || gruppo.voci.length === 0) return;
+                html += '<div class="tnt-group-label">' + f.etichetta + '</div>';
+                gruppo.voci.forEach((info) => {
+                    const hh = String(info.orario.getHours()).padStart(2, "0");
+                    const mm = String(info.orario.getMinutes()).padStart(2, "0");
+                    const stessoGiornoDiOggi = info.orario.getFullYear() === ora.getFullYear() && info.orario.getMonth() === ora.getMonth() && info.orario.getDate() === ora.getDate();
+                    const etichettaOrario = stessoGiornoDiOggi ? (hh + ':' + mm) : (String(info.orario.getDate()).padStart(2, "0") + "/" + String(info.orario.getMonth() + 1).padStart(2, "0") + " " + hh + ':' + mm);
+                    const listaBaie = info.baie.filter(Boolean).sort(confrontaBaie).join(", ");
+                    if (listaBaie.indexOf("*") !== -1) presenteAsterisco = true;
+                    html += '<div class="tnt-card ' + f.classe + '">'
+                        + '<div class="tnt-card-row">'
+                        + '<span class="tnt-card-title">' + info.nome + ' (' + info.baie.length + ')</span>'
+                        + '<span class="tnt-badge">' + etichettaOrario + '</span>'
+                        + '</div>'
+                        + '<div class="tnt-card-sub">Baie: ' + listaBaie + '</div>'
+                        + '</div>';
+                });
+            });
+            if (presenteAsterisco) {
+                html += '<div class="tnt-footnote">* slittato al cutoff successivo per late arrival (meno di 150min di lavorazione disponibili)</div>';
+            }
         }
+
+        // --- Baie libere: elenco delle baie numeriche di scarico SENZA nessun mezzo agganciato
+        // in questo momento (letto dal registro arrivi, la fonte affidabile di occupazione
+        // reale — non "assenti dal pannello cutoff", che potrebbero invece essere occupate ma
+        // ancora in attesa di verifica del cutoff). Si aggiorna ad ogni scansione del pannello,
+        // quindi appena una baia viene occupata sparisce da qui al refresh successivo.
+        const arriviAttuali = caricaArriviBaia();
+        const baieLibere = elencoBaieScaricoComplete().filter((n) => {
+            const voce = arriviAttuali[n];
+            return !voce || !voce.unitId;
+        });
+        html += '<div class="tnt-group-label">Baie libere (' + baieLibere.length + ')</div>';
+        html += '<div class="tnt-card tnt-card-verde"><div class="tnt-card-sub">'
+            + (baieLibere.length > 0 ? baieLibere.join(", ") : "Nessuna baia libera")
+            + '</div></div>';
+
         panelBody.innerHTML = html;
     }
 
