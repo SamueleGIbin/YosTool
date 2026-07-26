@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.7
+// @version      2.8
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -680,23 +680,22 @@
 
     const DOOR_NUM_SELECTOR_SCARICO = ".door_number, .west_door_number, .east_door_number, .reverse_door_number";
     function trovaBaieScaricoOccupate() {
+        // In precedenza questa funzione cercava nel DOM un elemento con classe "unit-assigned"
+        // per decidere se una baia fosse "occupata". Ma alcuni stati del camion (es. buffer,
+        // parzialmente scaricato — la stessa causa del bug della baia 107) non applicano quella
+        // classe pur avendo un mezzo realmente presente, quindi la baia veniva del tutto
+        // ignorata dal pannello anche con dati di cutoff corretti e disponibili. La fonte più
+        // affidabile per "questa baia/parcheggio è occupata" è il registro arrivi, che
+        // elaboraRispostaDockingDoors tiene sincronizzato con l'API in base alla sola presenza
+        // di un mezzo (unitDTO), non da classi CSS che possono variare di stato in stato.
+        const arrivi = caricaArriviBaia();
         const risultati = [];
-        document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO).forEach((numEl) => {
-            const span = numEl.querySelector("span");
-            if (!span) return;
-            const doorNumber = span.textContent.trim();
-            if (!doorNumber) return;
-            // Oltre alle baie numeriche di scarico, includiamo anche i parcheggi (es. "P312"):
-            // un camion in attesa in un parcheggio è comunque fisicamente tracciabile tramite
-            // la stessa API/DOM delle baie, quindi va trattato come fonte "attuale" allo stesso
-            // modo — non come voce presunta/schedulata.
+        Object.keys(arrivi).forEach((doorNumber) => {
+            const voce = arrivi[doorNumber];
+            if (!voce || !voce.unitId) return;
             const cat = categoriaBaia(doorNumber);
             if (cat !== "Scarico" && cat !== "Parcheggio") return;
-            const wrapper = numEl.closest('[id^="unit_"]');
-            if (!wrapper) return;
-            const container = wrapper.querySelector('[id^="container_"].unit-assigned');
-            if (!container) return;
-            risultati.push({ doorNumber, container });
+            risultati.push({ doorNumber });
         });
         return risultati;
     }
