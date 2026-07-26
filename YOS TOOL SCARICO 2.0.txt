@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      3.1
+// @version      3.2
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -290,6 +290,8 @@
     ];
     const SOGLIA_OUTBOUND_MINUTI = 60;
     const SOGLIA_SCARICO_MINUTI = 500;
+    const MARGINE_MINIMO_LAVORAZIONE_MINUTI = 150;
+    const ORARIO_RIAPERTURA_DOMENICA_MINUTI = 20 * 60 + 30;
 
     function categoriaBaia(door) {
         if (/^P/i.test(door)) return "Parcheggio";
@@ -321,7 +323,7 @@
         const minutiGiorno = data.getHours() * 60 + data.getMinutes();
         if (giorno === 5 && minutiGiorno >= 2 * 60) return true;
         if (giorno === 6) return true;
-        if (giorno === 0 && minutiGiorno < 20 * 60) return true;
+        if (giorno === 0 && minutiGiorno < ORARIO_RIAPERTURA_DOMENICA_MINUTI + MARGINE_MINIMO_LAVORAZIONE_MINUTI) return true;
         return false;
     }
 
@@ -336,7 +338,7 @@
         candidati.sort((a, b) => a.getTime() - b.getTime());
         for (const d of candidati) {
             const margine = (d.getTime() - arrivoPortaReale.getTime()) / 60000;
-            if (margine >= 150) return d;
+            if (margine >= MARGINE_MINIMO_LAVORAZIONE_MINUTI) return d;
         }
         return candidati.length > 0 ? candidati[candidati.length - 1] : null;
     }
@@ -360,7 +362,7 @@
         if (choices.length > 1) {
             for (let i = 0; i < choices.length; i++) {
                 const diffMinutiArrivoCutoff = (choices[i].cutoffDate.getTime() - arrivo.getTime()) / 60000;
-                if (diffMinutiArrivoCutoff >= 150) { risultato = choices[i]; break; }
+                if (diffMinutiArrivoCutoff >= MARGINE_MINIMO_LAVORAZIONE_MINUTI) { risultato = choices[i]; break; }
             }
             if (!risultato) risultato = choices[0];
         } else {
@@ -369,7 +371,7 @@
 
         if (arrivoPortaReale && !isNaN(arrivoPortaReale.getTime())) {
             const margineReale = (risultato.cutoffDate.getTime() - arrivoPortaReale.getTime()) / 60000;
-            if (margineReale < 150) {
+            if (margineReale < MARGINE_MINIMO_LAVORAZIONE_MINUTI) {
                 const nuovoCutoff = trovaProssimoCutoffConMargine(risultato.cutoffDate, arrivoPortaReale);
                 if (nuovoCutoff) {
                     risultato = { cat: risultato.cat, cutoffDate: nuovoCutoff, cutoffOriginale: risultato.cutoffDate, ritardo: true };
@@ -404,7 +406,9 @@
         ".tnt-card-verde{border-left-color:#5DCAA5;}",
         ".tnt-card-verde .tnt-badge{background:#043d33;color:#BFF3DF;}",
         ".tnt-empty{padding:16px 8px;opacity:0.85;font-family:Roboto,sans-serif;color:#e2e2e5;font-size:13px;text-align:center;}",
-        ".tnt-footnote{padding:10px 6px 4px;font-size:10px;color:#FF8B8A;font-family:Roboto,sans-serif;}",
+        ".tnt-footnote{margin:8px 6px 4px;padding:9px 11px;border-radius:6px;background:#4d2c04;font-size:12px;font-weight:600;line-height:1.45;color:#FFE1AD;font-family:Roboto,sans-serif;}",
+        ".tnt-banner-ritardo{margin-top:10px;padding:10px 12px;border-radius:6px;background:#4d2c04;color:#FFE1AD;font-size:13px;font-weight:600;line-height:1.45;font-family:Roboto,sans-serif;}",
+        ".tnt-banner-ritardo strong{color:#FFCC66;font-size:14px;}",
         ".tnt-panel-body label{display:block;font-size:12px;margin-bottom:3px;color:#c7c7cc;}",
         ".tnt-panel-body input[type=date]{width:100%;margin-bottom:12px;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;box-sizing:border-box;}",
         ".tnt-panel-body button{width:100%;padding:9px;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;margin-bottom:8px;border:none;}",
@@ -558,24 +562,25 @@
                     riga.appendChild(creaColTurno("Tipo Cutoff", risultato.cat.nome));
                     const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
                     const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
-                    let testoCutoff = hh + ":" + mm;
-                    if (risultato.ritardo && risultato.cutoffOriginale) {
-                        const hhO = String(risultato.cutoffOriginale.getHours()).padStart(2, "0");
-                        const mmO = String(risultato.cutoffOriginale.getMinutes()).padStart(2, "0");
-                        testoCutoff = "* " + hhO + ":" + mmO + " -> " + hh + ":" + mm + " per late arrival";
-                    }
-                    const colCutoff = creaColTurno("Orario Cutoff", testoCutoff, risultato.ritardo ? "col-4" : "col-4");
-                    if (risultato.ritardo) {
-                        const valEl = colCutoff.querySelector(".door-info__movmt-value");
-                        if (valEl) { valEl.style.color = "#ff3b30"; valEl.title = "Cutoff slittato: meno di 150 minuti di lavorazione tra l'arrivo reale alla baia e il cutoff originale"; }
-                    }
-                    riga.appendChild(colCutoff);
+                    riga.appendChild(creaColTurno("Orario Cutoff", hh + ":" + mm));
                 } else {
                     riga.appendChild(creaColTurno("Turno", "N/A"));
                     riga.appendChild(creaColTurno("Tipo Cutoff", "N/A"));
                     riga.appendChild(creaColTurno("Orario Cutoff", "N/A"));
                 }
                 sezione.appendChild(riga);
+                const vecchioAvviso = sezione.querySelector(".tnt-avviso-ritardo");
+                if (vecchioAvviso) vecchioAvviso.remove();
+                if (risultato && risultato.ritardo && risultato.cutoffOriginale) {
+                    const hhO = String(risultato.cutoffOriginale.getHours()).padStart(2, "0");
+                    const mmO = String(risultato.cutoffOriginale.getMinutes()).padStart(2, "0");
+                    const hhN = String(risultato.cutoffDate.getHours()).padStart(2, "0");
+                    const mmN = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
+                    const avviso = document.createElement("div");
+                    avviso.className = "row door-info__movmt-section-row tnt-avviso-ritardo";
+                    avviso.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Cutoff spostato per arrivo in ritardo: <strong>' + hhO + ':' + mmO + '</strong> &rarr; <strong>' + hhN + ':' + mmN + '</strong> (meno di ' + MARGINE_MINIMO_LAVORAZIONE_MINUTI + ' minuti di lavorazione disponibili)</div></div>';
+                    sezione.appendChild(avviso);
+                }
             } catch (e) {}
         });
     }
@@ -979,10 +984,10 @@
             const ora = new Date();
             const voci = [...gruppi.entries()].sort((a, b) => a[1].orario.getTime() - b[1].orario.getTime());
             const fasce = [
-                { chiave: "ritardo", etichetta: "In ritardo", classe: "tnt-card-rosso", test: (m) => m < 0 },
-                { chiave: "30", etichetta: "Entro 30 min", classe: "tnt-card-rosso", test: (m) => m <= 30 },
-                { chiave: "60", etichetta: "Entro 60 min", classe: "tnt-card-ambra", test: (m) => m <= 60 },
-                { chiave: "oltre", etichetta: "Successivi", classe: "tnt-card-ambra", test: () => true }
+                { chiave: "ritardo", etichetta: "Cutoff scaduto", classe: "tnt-card-rosso", test: (m) => m < 0 },
+                { chiave: "30", etichetta: "Cutoff entro 30 minuti", classe: "tnt-card-rosso", test: (m) => m <= 30 },
+                { chiave: "60", etichetta: "Cutoff entro 60 minuti", classe: "tnt-card-ambra", test: (m) => m <= 60 },
+                { chiave: "oltre", etichetta: "Prossimi cutoff", classe: "tnt-card-ambra", test: () => true }
             ];
             const bucket = new Map();
             voci.forEach(([chiave, info]) => {
@@ -1013,7 +1018,7 @@
                 });
             });
             if (presenteAsterisco) {
-                html += '<div class="tnt-footnote">* slittato al cutoff successivo per late arrival (meno di 150min di lavorazione disponibili)</div>';
+                html += '<div class="tnt-footnote">* Cutoff spostato al turno successivo: arrivo troppo vicino al cutoff originale (meno di ' + MARGINE_MINIMO_LAVORAZIONE_MINUTI + ' minuti di lavorazione disponibili)</div>';
             }
         }
 
