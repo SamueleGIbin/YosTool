@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.8
+// @version      2.9
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -1051,6 +1051,20 @@
         renderPannelloScaricoConteggi(panelBody, gruppi);
     }
 
+    function confrontaBaie(a, b) {
+        // Ordine crescente per numero di baia (100 in su), asterisco '*' di ritardo ignorato
+        // ai fini del confronto. I parcheggi (es. "P312", senza numero puro) vanno in fondo,
+        // in ordine alfabetico tra loro.
+        const na = parseInt(a, 10);
+        const nb = parseInt(b, 10);
+        const aNum = !isNaN(na);
+        const bNum = !isNaN(nb);
+        if (aNum && bNum) return na - nb;
+        if (aNum) return -1;
+        if (bNum) return 1;
+        return a.localeCompare(b);
+    }
+
     function renderPannelloScaricoConteggi(panelBody, gruppi) {
         if (gruppi.size === 0) {
             panelBody.innerHTML = '<div class="tnt-empty">Nessuno scarico in scadenza</div>';
@@ -1082,7 +1096,7 @@
                 const mm = String(info.orario.getMinutes()).padStart(2, "0");
                 const stessoGiornoDiOggi = info.orario.getFullYear() === ora.getFullYear() && info.orario.getMonth() === ora.getMonth() && info.orario.getDate() === ora.getDate();
                 const etichettaOrario = stessoGiornoDiOggi ? (hh + ':' + mm) : (String(info.orario.getDate()).padStart(2, "0") + "/" + String(info.orario.getMonth() + 1).padStart(2, "0") + " " + hh + ':' + mm);
-                const listaBaie = info.baie.filter(Boolean).join(", ");
+                const listaBaie = info.baie.filter(Boolean).sort(confrontaBaie).join(", ");
                 if (listaBaie.indexOf("*") !== -1) presenteAsterisco = true;
                 html += '<div class="tnt-card ' + f.classe + '">'
                     + '<div class="tnt-card-row">'
