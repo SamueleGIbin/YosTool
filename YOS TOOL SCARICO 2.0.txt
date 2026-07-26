@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      3.1
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff + Tracciamento Arrivi Baia + Esportazione Report CSV con selezione intervallo date
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        none
@@ -85,12 +85,7 @@
         });
     }
 
-    // cacheMovimentiPerUnit resta come cache di supporto: quando un camion è fisicamente in
-    // baia o in un parcheggio (unica fonte usata ora dal pannello), serve a recuperarne
-    // l'origine/orario programmato intercettati dall'API dei movimenti. Va comunque svuotata
-    // periodicamente: un unitId molto vecchio e mai più visto in nessuna baia/parcheggio non
-    // serve più a nulla ed è inutile tenerlo in memoria per l'intero turno.
-    const FINESTRA_CONSERVAZIONE_CACHE_MOVIMENTI_MS = 16 * 60 * 60 * 1000; // 16 ore
+    const FINESTRA_CONSERVAZIONE_CACHE_MOVIMENTI_MS = 16 * 60 * 60 * 1000;
     function pulisciRegistriSenzaBaia() {
         const ora = Date.now();
         cacheMovimentiPerUnit.forEach((mov, unitId) => {
@@ -133,15 +128,6 @@
             const doorNumber = porta && porta.doorName;
             if (!doorNumber) return;
             const unit = porta.unitDTO;
-            // In precedenza qui si controllava porta.status !== "OCCUPIED": ma la stessa baia,
-            // con lo stesso camion ancora fisicamente presente, può passare per altri stati
-            // (es. buffer, parzialmente scaricato — vedi classi "buffer-unit
-            // partiallyloaded_outline" nel DOM) che l'API NON riporta come "OCCUPIED" pur
-            // avendo ancora un unitDTO valido agganciato alla baia. Con il controllo sullo
-            // status, ogni cambio di stato del genere cancellava arrivi[doorNumber] (incluso
-            // l'orario reale di arrivo), facendo tornare "Orario Arrivo Camion" a N/A e
-            // perdendo per sempre il dato originale. L'unica condizione che deve davvero
-            // svuotare la baia è l'assenza del mezzo (nessun unitDTO / unitId).
             if (!unit || !unit.unitId) {
                 if (arrivi[doorNumber]) {
                     delete arrivi[doorNumber];
@@ -151,22 +137,9 @@
                 return;
             }
             const unitId = unit.unitId;
-            // Un camion visto in una baia numerica di Scarico è considerato "già passato in
-            // baia": se in seguito lo ritroviamo di nuovo in un parcheggio, è il rientro post-
-            // scarico (in attesa di ripartire), non un camion ancora da scaricare. Lo segniamo
-            // qui per poterlo escludere più avanti dal pannello quando riappare in parcheggio.
             if (categoriaBaia(doorNumber) === "Scarico") unitGiaScaricati.set(String(unitId), Date.now());
             const esistente = arrivi[doorNumber];
             const cambiaUnit = !esistente || esistente.unitId !== unitId;
-            // Cattura l'orario reale di arrivo SOLO quando il mezzo è nuovo alla baia o quando
-            // la sua azione TRANSITA per la prima volta in START_UNLOADING/LOCATION_ASSIGNED
-            // (non ogni volta che l'API ripete lo stesso stato). In precedenza la condizione
-            // era "unit.currentAction === START_UNLOADING", vera ad OGNI polling per tutta la
-            // durata dello scarico: se il timestamp del backend si aggiornava anche di poco ad
-            // ogni giro, orarioCambiato diventava sempre true, invalidando la cache e
-            // rimettendo in coda di verifica OGNI baia occupata ogni ~5 secondi — la coda non
-            // riusciva più a smaltire nulla e nessuna baia reale veniva più mostrata (tutto
-            // finiva tra parentesi, cioè nella coda "senza baia" delle Fonti 4/5).
             const azionePrecedente = esistente && esistente.action;
             const transitaAdAzioneTracciata = (unit.currentAction === "START_UNLOADING" || unit.currentAction === "LOCATION_ASSIGNED")
                 && azionePrecedente !== unit.currentAction;
@@ -179,14 +152,6 @@
                 } else {
                     orario = new Date().toISOString();
                 }
-                // L'orario reale di arrivo alla baia (voce.orario) è l'input che decide se un
-                // camion slitta al cutoff successivo per "late arrival". Se questo orario non
-                // era ancora noto la prima volta che è stato calcolato il cutoff (es. Trip
-                // Details aperto appena il camion è comparso, prima dello START_UNLOADING),
-                // il risultato "non in ritardo" restava in cache per sempre: il pannello
-                // laterale non veniva più aggiornato anche quando il camion diventava
-                // realmente in ritardo. Invalidiamo la cache ogni volta che l'orario cambia,
-                // non solo quando cambia il mezzo.
                 const orarioCambiato = !esistente || esistente.orario !== orario;
                 if (cambiaUnit || orarioCambiato) {
                     cacheCutoffPerBaia.delete(doorNumber);
@@ -199,10 +164,6 @@
                 const catPerVerifica = categoriaBaia(doorNumber);
                 if ((catPerVerifica === "Scarico" || catPerVerifica === "Parcheggio") && (cambiaUnit || orarioCambiato)) accodaVerificaBaia(doorNumber, unitId);
             } else if (esistente && esistente.action !== unit.currentAction) {
-                // Azione cambiata ma non verso uno stato che porta un nuovo orario reale
-                // (es. da START_UNLOADING a un altro stato successivo): aggiorniamo solo il
-                // campo "action" per tenere aggiornata la transizione, senza toccare l'orario
-                // né invalidare le cache già valide.
                 arrivi[doorNumber] = { unitId: unitId, orario: esistente.orario, action: unit.currentAction };
                 modificato = true;
             }
@@ -210,10 +171,6 @@
         if (modificato) salvaArriviBaia(arrivi);
     }
 
-    // --- Coda di verifica cutoff: garantisce che OGNI truck a una baia di scarico venga
-    // controllato almeno una volta, senza dover riscansionare tutte le baie a ripetizione.
-    // Un nuovo truck viene accodato solo nel momento esatto in cui viene rilevato (evento),
-    // non con un polling periodico su tutte le baie.
     const unitVerificatiCutoff = new Set();
     const codaVerificaBaie = [];
     let codaInLavorazione = false;
@@ -243,10 +200,6 @@
         const x = rect.left + rect.width / 2;
         const y = rect.top + rect.height / 2;
         const opzioniBase = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0 };
-        // Alcune interfacce (specie quelle basate su gestione di puntatore/drag come questa,
-        // vedi "ui-draggable" nel markup delle baie) non reagiscono ad un semplice evento
-        // "click" sintetico senza la sequenza completa di eventi che un click reale del mouse
-        // genera. Replichiamo l'intera sequenza con coordinate reali sull'elemento.
         ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((tipo) => {
             try {
                 const EventCtor = tipo.indexOf("pointer") === 0 && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
@@ -262,9 +215,7 @@
             const voce = codaVerificaBaie.shift();
             const arrivi = caricaArriviBaia();
             const attuale = arrivi[voce.doorNumber];
-            // Se nel frattempo il truck non è più in quella baia, la voce non è più valida.
             if (!attuale || String(attuale.unitId) !== voce.unitId) { codaInLavorazione = false; return; }
-            // Se nel frattempo l'API dei movimenti ha già fornito i dati, non serve forzare nulla.
             if (cacheCutoffPerBaia.has(voce.doorNumber) || calcolaCutoffDaCacheMovimenti(voce.doorNumber)) {
                 unitVerificatiCutoff.add(voce.unitId);
                 codaInLavorazione = false;
@@ -283,10 +234,6 @@
                 unitVerificatiCutoff.add(voce.unitId);
             } else {
                 voce.tentativi = (voce.tentativi || 0) + 1;
-                // Non segniamo mai un camion come "verificato" senza aver davvero ottenuto un
-                // cutoff: farlo lo farebbe sparire per sempre dall'orologio pur non avendo
-                // nessun dato su di lui. Dopo qualche tentativo ravvicinato rallentiamo
-                // (ributtandolo in coda più avanti, non subito) invece di arrenderci.
                 if (voce.tentativi <= 5) {
                     codaVerificaBaie.push(voce);
                 } else {
@@ -369,13 +316,8 @@
     }
     const SLOT_CUTOFF_UNICI = elencoSlotCutoffUnici();
 
-    // Il magazzino è chiuso ogni settimana dal venerdì alle 02:00 alla domenica alle 20:00.
-    // Nessuno degli slot di cutoff che cadono in questa finestra è realmente valido: un
-    // camion ancora in baia da prima/durante la chiusura non deve restare agganciato al
-    // cutoff dell'ultimo slot valido prima della chiusura (altrimenti, alla riapertura,
-    // risulta "in ritardo" di giorni), ma va spostato al primo slot valido DOPO la riapertura.
     function eOrarioDiChiusura(data) {
-        const giorno = data.getDay(); // 0=domenica, 5=venerdì, 6=sabato
+        const giorno = data.getDay();
         const minutiGiorno = data.getHours() * 60 + data.getMinutes();
         if (giorno === 5 && minutiGiorno >= 2 * 60) return true;
         if (giorno === 6) return true;
@@ -689,14 +631,6 @@
 
     const DOOR_NUM_SELECTOR_SCARICO = ".door_number, .west_door_number, .east_door_number, .reverse_door_number";
     function trovaBaieScaricoOccupate() {
-        // In precedenza questa funzione cercava nel DOM un elemento con classe "unit-assigned"
-        // per decidere se una baia fosse "occupata". Ma alcuni stati del camion (es. buffer,
-        // parzialmente scaricato — la stessa causa del bug della baia 107) non applicano quella
-        // classe pur avendo un mezzo realmente presente, quindi la baia veniva del tutto
-        // ignorata dal pannello anche con dati di cutoff corretti e disponibili. La fonte più
-        // affidabile per "questa baia/parcheggio è occupata" è il registro arrivi, che
-        // elaboraRispostaDockingDoors tiene sincronizzato con l'API in base alla sola presenza
-        // di un mezzo (unitDTO), non da classi CSS che possono variare di stato in stato.
         const arrivi = caricaArriviBaia();
         const risultati = [];
         Object.keys(arrivi).forEach((doorNumber) => {
@@ -711,7 +645,6 @@
 
     const STORAGE_KEY_ARRIVI = "tnt_arrivi_baia_scarico_v1";
     const STORAGE_KEY_STORICO = "tnt_storico_report_scarico_v1";
-    const assenzeConsecutive = new Map();
     let baiaSelezionata = null;
 
     function caricaArriviBaia() {
@@ -871,35 +804,6 @@
         });
     }
 
-    function aggiornaTracciamentoArrivi() {
-        const arrivi = caricaArriviBaia();
-        let modificato = false;
-        document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO).forEach((numEl) => {
-            const span = numEl.querySelector("span");
-            if (!span) return;
-            const doorNumber = span.textContent.trim();
-            if (!doorNumber || categoriaBaia(doorNumber) !== "Scarico") return;
-            const wrapper = numEl.closest('[id^="unit_"]');
-            if (!wrapper) return;
-            const container = wrapper.querySelector('[id^="container_"].unit-assigned');
-            if (container) {
-                assenzeConsecutive.set(doorNumber, 0);
-                if (!arrivi[doorNumber]) {
-                    arrivi[doorNumber] = { unitId: null, orario: new Date().toISOString() };
-                    modificato = true;
-                }
-            } else {
-                const conteggio = (assenzeConsecutive.get(doorNumber) || 0) + 1;
-                assenzeConsecutive.set(doorNumber, conteggio);
-                if (conteggio >= 2 && arrivi[doorNumber]) {
-                    delete arrivi[doorNumber];
-                    modificato = true;
-                }
-            }
-        });
-        if (modificato) salvaArriviBaia(arrivi);
-    }
-
     function trovaRigaPerChiavi(ambito, chiavi) {
         const keys = ambito.querySelectorAll(".door-info__movmt-key");
         for (const k of keys) {
@@ -1010,29 +914,15 @@
             const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
             if (diffMinuti > SOGLIA_SCARICO_MINUTI) return;
             const senzaBaiaAssegnata = /^\(.*\)$/.test(infoBaia);
-            if (senzaBaiaAssegnata) return; // non dovrebbe più accadere: nessuna fonte produce più voci senza baia/parcheggio reale
+            if (senzaBaiaAssegnata) return;
             const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
             const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
-            // BUG CORRETTO: la chiave doveva includere anche la DATA del cutoff, non solo
-            // l'ora. Ogni categoria ricorre ogni giorno alla stessa ora (es. Import di Prima
-            // sempre alle 21:30): senza la data, il cutoff di OGGI alle 21:30 e quello di
-            // DOMANI alle 21:30 finivano nello stesso gruppo, che mostrava l'orario e lo stato
-            // "in ritardo" del primo camion capitato in quello slot — anche se magari era di
-            // un altro giorno. Risultato: bucket enormi (137, 62...) che mischiavano camion di
-            // più giorni diversi, e camion in realtà ancora lontani segnati come scaduti solo
-            // perché raggruppati insieme a uno stesso slot orario di un giorno già passato.
             const dataChiave = risultato.cutoffDate.getFullYear() + "-" + String(risultato.cutoffDate.getMonth() + 1).padStart(2, "0") + "-" + String(risultato.cutoffDate.getDate()).padStart(2, "0");
             const chiave = risultato.cat.nome + "|" + dataChiave + " " + hh + ":" + mm;
             if (!gruppi.has(chiave)) gruppi.set(chiave, { nome: risultato.cat.nome, turno: risultato.cat.turno, orario: risultato.cutoffDate, baie: [] });
             gruppi.get(chiave).baie.push(risultato.ritardo ? infoBaia + "*" : infoBaia);
         }
 
-        // --- Fonte 1: baie di scarico E parcheggi fisicamente occupati (dato dalla
-        // docking-door API, cioè il camion è realmente "entrato" in baia o in un parcheggio).
-        // È volutamente l'UNICA fonte usata: rispecchia solo la situazione ATTUALE. Un camion
-        // non ancora arrivato in nessuna baia/parcheggio semplicemente non compare — niente
-        // più voci "presunte" da widget schedulati o da registri accumulati nel tempo, che
-        // erano la causa dei dati vecchi di giorni e dei conteggi gonfiati.
         const baie = trovaBaieScaricoOccupate();
         const arriviCorrenti = caricaArriviBaia();
         for (const baia of baie) {
@@ -1066,11 +956,6 @@
     }
 
     function confrontaBaie(a, b) {
-        // I parcheggi (es. "P312") vengono PRIMA, in ordine crescente tra loro: un camion
-        // ancora in parcheggio deve ancora essere spostato in baia, quindi ha priorità
-        // operativa rispetto a chi è già agganciato a una baia numerica. A seguire le baie
-        // numeriche in ordine crescente (100 in su). L'asterisco '*' di ritardo viene
-        // ignorato ai fini del confronto.
         const aPark = /^P/i.test(a);
         const bPark = /^P/i.test(b);
         if (aPark && bPark) return parseInt(a.replace(/^P/i, ""), 10) - parseInt(b.replace(/^P/i, ""), 10);
@@ -1132,11 +1017,6 @@
             }
         }
 
-        // --- Baie libere: elenco delle baie numeriche di scarico SENZA nessun mezzo agganciato
-        // in questo momento (letto dal registro arrivi, la fonte affidabile di occupazione
-        // reale — non "assenti dal pannello cutoff", che potrebbero invece essere occupate ma
-        // ancora in attesa di verifica del cutoff). Si aggiorna ad ogni scansione del pannello,
-        // quindi appena una baia viene occupata sparisce da qui al refresh successivo.
         const arriviAttuali = caricaArriviBaia();
         const baieLibere = elencoBaieScaricoComplete().filter((n) => {
             const voce = arriviAttuali[n];
@@ -1181,12 +1061,6 @@
         const panel = document.getElementById("tnt-orologio-scarico-panel");
         const body = document.getElementById("tnt-orologio-scarico-panel-body");
         if (!body || !panel || panel.style.display === "none") return;
-        // Il pannello veniva popolato solo al click di apertura (collegaClick chiama
-        // scansionaBaieScarico una volta sola). Le Fonti 4 e 5 registrano un camion non
-        // appena l'API dei movimenti o il Trip Details lo mostrano, ma se il pannello era
-        // già aperto in quel momento restava fermo alla scansione precedente finché non
-        // veniva richiuso e riaperto. Con questo refresh periodico il pannello resta sempre
-        // allineato a ciò che lo script ha già intercettato, senza bisogno di riaprirlo.
         scansionaBaieScarico(body);
     }
 
@@ -1343,7 +1217,6 @@
     try { scanBlocchi(document.body); } catch (e) {}
     try { pulisciStoricoVecchio(); } catch (e) {}
     try { initIcone(); } catch (e) {}
-    try { aggiornaTracciamentoArrivi(); } catch (e) {}
     try { processaTripDetails(); } catch (e) {}
 
     let debounceTimer = null;
@@ -1353,7 +1226,6 @@
         nodiDaControllare.clear();
         try { nodi.forEach((n) => { if (document.body.contains(n)) scanBlocchi(n); }); } catch (e) {}
         try { initIcone(); } catch (e) {}
-        try { aggiornaTracciamentoArrivi(); } catch (e) {}
         try { processaTripDetails(); } catch (e) {}
         try { aggiornaPannelloOutbound(); } catch (e) {}
     }
@@ -1373,7 +1245,6 @@
     });
     observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class"] });
 
-    setInterval(aggiornaTracciamentoArrivi, 5000);
     setInterval(aggiornaPannelloOutbound, 15000);
     setInterval(aggiornaPannelloScaricoSeAperto, 15000);
     setInterval(pulisciStoricoVecchio, 60 * 60 * 1000);
