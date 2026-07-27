@@ -1761,9 +1761,9 @@
         });
     }
 
-    function posizionaPannelloSingolo(panel, btn) {
+    function posizionaPannelloSingolo(panel) {
         const menu = document.querySelector(".cc-hub-menu-panel");
-        const rectMenu = menu ? menu.getBoundingClientRect() : btn.getBoundingClientRect();
+        const rectMenu = menu ? menu.getBoundingClientRect() : panel.getBoundingClientRect();
         const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
         panel.style.top = rectMenu.top + "px";
         panel.style.left = rectMenu.right + "px";
@@ -1784,7 +1784,7 @@
             chiudiTuttiIPannelli();
             if (eraAperto) return;
             panel.style.display = "flex";
-            posizionaPannelloSingolo(panel, btn);
+            posizionaPannelloSingolo(panel);
             callbackAggiorna();
         });
         panel.addEventListener("click", (e) => e.stopPropagation());
@@ -1842,9 +1842,28 @@
         chiudiPannelliEsclusi(ORDINE_GRUPPO_CARICO_SCARICO);
     });
 
-    window.addEventListener("resize", () => {
+    const ID_PANNELLI_SINGOLI = ["tnt-report-panel", "tnt-statistiche-panel"];
+
+    function riposizionaPannelliAperti() {
         posizionaPannelliGruppo(ORDINE_GRUPPO_CARICO_SCARICO);
-    });
+        ID_PANNELLI_SINGOLI.forEach((id) => {
+            const p = document.getElementById(id);
+            if (pannelloAperto(p)) posizionaPannelloSingolo(p);
+        });
+    }
+
+    let riposizionamentoSchedulato = false;
+    function schedulaRiposizionamento() {
+        if (riposizionamentoSchedulato) return;
+        riposizionamentoSchedulato = true;
+        requestAnimationFrame(() => {
+            riposizionamentoSchedulato = false;
+            riposizionaPannelliAperti();
+        });
+    }
+
+    window.addEventListener("resize", schedulaRiposizionamento);
+    window.addEventListener("scroll", schedulaRiposizionamento, true);
 
     document.addEventListener("click", (e) => {
         const wrapper = e.target.closest('[id^="unit_"]');
