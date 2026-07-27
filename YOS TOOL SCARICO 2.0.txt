@@ -22,40 +22,7 @@
         INTERVALLO_MS: 3 * 60 * 1000
     };
 
-    const ACCESS_GATE = {
-        SALT_B64: "",
-        IV_B64: "",
-        CIPHERTEXT_B64: ""
-    };
-    const SESSION_KEY_GATE = "yosToolGateToken";
-
-    function b64ToBuf(b64) {
-        const bin = atob(b64);
-        const buf = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-        return buf.buffer;
-    }
-
-    async function derivaChiave(password, saltBuf) {
-        const encoder = new TextEncoder();
-        const materialeBase = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
-        return crypto.subtle.deriveKey(
-            { name: "PBKDF2", salt: saltBuf, iterations: 200000, hash: "SHA-256" },
-            materialeBase,
-            { name: "AES-GCM", length: 256 },
-            false,
-            ["decrypt"]
-        );
-    }
-
-    async function provaSblocco(password) {
-        const saltBuf = b64ToBuf(ACCESS_GATE.SALT_B64);
-        const ivBuf = b64ToBuf(ACCESS_GATE.IV_B64);
-        const cipherBuf = b64ToBuf(ACCESS_GATE.CIPHERTEXT_B64);
-        const chiave = await derivaChiave(password, saltBuf);
-        const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivBuf }, chiave, cipherBuf);
-        return new TextDecoder().decode(plainBuf);
-    }
+    const CHIAVE_TOKEN_LOCALE = "yosToolToken";
 
     function mostraSchermataAccesso() {
         return new Promise((resolve) => {
@@ -65,31 +32,21 @@
             overlay.innerHTML =
                 '<div style="background:#2c2c2e;padding:32px;border-radius:12px;width:280px;text-align:center;">' +
                 '<div style="color:#fff;font-size:16px;margin-bottom:16px;">YOS TOOL</div>' +
-                '<input id="tnt-gate-input" type="password" style="width:100%;box-sizing:border-box;padding:10px;border-radius:6px;border:1px solid #555;background:#1c1c1e;color:#fff;margin-bottom:10px;" placeholder="Codice accesso">' +
+                '<input id="tnt-gate-input" type="password" style="width:100%;box-sizing:border-box;padding:10px;border-radius:6px;border:1px solid #555;background:#1c1c1e;color:#fff;margin-bottom:10px;" placeholder="Incolla la stringa">' +
                 '<button id="tnt-gate-btn" style="width:100%;padding:10px;border-radius:6px;border:none;background:#0A84FF;color:#fff;cursor:pointer;">Entra</button>' +
-                '<div id="tnt-gate-errore" style="color:#ff453a;font-size:12px;margin-top:10px;height:14px;"></div>' +
                 '</div>';
             document.body.appendChild(overlay);
 
             const input = overlay.querySelector("#tnt-gate-input");
             const btn = overlay.querySelector("#tnt-gate-btn");
-            const errore = overlay.querySelector("#tnt-gate-errore");
             input.focus();
 
-            async function tenta() {
-                errore.textContent = "";
-                const pwd = input.value;
-                if (!pwd) return;
-                try {
-                    const token = await provaSblocco(pwd);
-                    try { localStorage.setItem(SESSION_KEY_GATE, token); } catch (e) {}
-                    overlay.remove();
-                    resolve(token);
-                } catch (e) {
-                    errore.textContent = "Codice errato";
-                    input.value = "";
-                    input.focus();
-                }
+            function tenta() {
+                const valore = input.value.trim();
+                if (!valore) return;
+                try { localStorage.setItem(CHIAVE_TOKEN_LOCALE, valore); } catch (e) {}
+                overlay.remove();
+                resolve(valore);
             }
             btn.addEventListener("click", tenta);
             input.addEventListener("keydown", (e) => { if (e.key === "Enter") tenta(); });
@@ -97,9 +54,8 @@
     }
 
     async function ottieniTokenAccesso() {
-        if (!ACCESS_GATE.CIPHERTEXT_B64) return "";
         try {
-            const cache = localStorage.getItem(SESSION_KEY_GATE);
+            const cache = localStorage.getItem(CHIAVE_TOKEN_LOCALE);
             if (cache) return cache;
         } catch (e) {}
         return mostraSchermataAccesso();
