@@ -858,16 +858,20 @@
         };
     }
 
+    const VERSIONE_DATI = 1;
+
     async function githubLeggiFile() {
         const url = "https://api.github.com/repos/" + GITHUB_SYNC.OWNER + "/" + GITHUB_SYNC.REPO + "/contents/" + GITHUB_SYNC.PATH + "?ref=" + GITHUB_SYNC.BRANCH;
         const res = await fetch(url, { headers: { "Authorization": "Bearer " + GITHUB_SYNC.TOKEN, "Accept": "application/vnd.github+json" } });
-        if (res.status === 404) return { dati: { storico: [], sessioni: [] }, sha: null };
+        if (res.status === 404) return { dati: { versione: VERSIONE_DATI, storico: [], sessioni: [], presenze: {} }, sha: null };
         if (!res.ok) throw new Error("GitHub GET " + res.status);
         const json = await res.json();
         let dati;
-        try { dati = JSON.parse(base64ParaUtf8(json.content.replace(/\n/g, ""))); } catch (e) { dati = { storico: [], sessioni: [] }; }
+        try { dati = JSON.parse(base64ParaUtf8(json.content.replace(/\n/g, ""))); } catch (e) { dati = { versione: VERSIONE_DATI, storico: [], sessioni: [], presenze: {} }; }
         if (!Array.isArray(dati.storico)) dati.storico = [];
         if (!Array.isArray(dati.sessioni)) dati.sessioni = [];
+        if (!dati.presenze || typeof dati.presenze !== "object") dati.presenze = {};
+        if (typeof dati.versione !== "number") dati.versione = 0;
         return { dati, sha: json.sha };
     }
 
@@ -885,6 +889,64 @@
         return true;
     }
 
+    function otteniDeviceId() {
+        try {
+            let id = localStorage.getItem("yosToolDeviceId");
+            if (!id) {
+                id = "PZ-" + Math.random().toString(36).slice(2, 8).toUpperCase();
+                localStorage.setItem("yosToolDeviceId", id);
+            }
+            return id;
+        } catch (e) {
+            return "PZ-TEMP";
+        }
+    }
+    const DEVICE_ID = otteniDeviceId();
+
+    function aggiornaPresenze(presenzeRemote) {
+        const presenze = Object.assign({}, presenzeRemote);
+        presenze[DEVICE_ID] = new Date().toISOString();
+        const limite = Date.now() - 2 * 24 * 60 * 60 * 1000;
+        Object.keys(presenze).forEach((id) => {
+            const t = new Date(presenze[id]).getTime();
+            if (isNaN(t) || t < limite) delete presenze[id];
+        });
+        return presenze;
+    }
+
+    function contaUtentiOggi(presenze) {
+        const oggi = new Date().toISOString().slice(0, 10);
+        return Object.keys(presenze || {}).filter((id) => (presenze[id] || "").slice(0, 10) === oggi).length;
+    }
+
+    function creaBadgeSync() {
+        if (document.getElementById("tnt-badge-sync")) return;
+        const badge = document.createElement("div");
+        badge.id = "tnt-badge-sync";
+        badge.style.cssText = "position:fixed;top:6px;right:10px;z-index:999998;display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-family:Roboto,sans-serif;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);";
+        badge.innerHTML = '<span id="tnt-badge-dot" style="width:8px;height:8px;border-radius:50%;background:#777;flex-shrink:0;"></span><span id="tnt-badge-testo">Sync...</span>';
+        document.body.appendChild(badge);
+    }
+
+    function aggiornaStatoSync(ok, utentiOggi) {
+        creaBadgeSync();
+        const dot = document.getElementById("tnt-badge-dot");
+        const testo = document.getElementById("tnt-badge-testo");
+        if (!dot || !testo) return;
+        if (!GITHUB_SYNC.ATTIVO || !GITHUB_SYNC.TOKEN) {
+            dot.style.background = "#777";
+            testo.textContent = "Sync OFF";
+            return;
+        }
+        if (ok) {
+            dot.style.background = "#34C759";
+            testo.textContent = "Sync ON \u00b7 " + (utentiOggi != null ? utentiOggi : "?") + " utenti oggi";
+        } else {
+            dot.style.background = "#E24B4A";
+            testo.textContent = "Sync OFF";
+        }
+    }
+
     let sincronizzazioneInCorso = false;
     let sincronizzazionePendente = false;
     let timerSincronizzazione = null;
@@ -895,28 +957,43 @@
         timerSincronizzazione = setTimeout(sincronizzaDati, ritardoMs || 5000);
     }
 
+    function attesa(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
     async function sincronizzaDati() {
-        if (!GITHUB_SYNC.ATTIVO || !GITHUB_SYNC.TOKEN) return;
+        if (!GITHUB_SYNC.ATTIVO || !GITHUB_SYNC.TOKEN) { aggiornaStatoSync(false, null); return; }
         if (sincronizzazioneInCorso) { sincronizzazionePendente = true; return; }
         sincronizzazioneInCorso = true;
         try {
-            for (let tentativo = 0; tentativo < 3; tentativo++) {
+            let presenzeFinali = {};
+            for (let tentativo = 0; tentativo < 6; tentativo++) {
                 const remoto = await githubLeggiFile();
+                if (remoto.dati.versione > VERSIONE_DATI) {
+                    console.warn("[YOS TOOL] Formato dati remoto piu' recente di questo script: sync sospesa");
+                    aggiornaStatoSync(false, null);
+                    return;
+                }
                 const storicoUnito = unisciSenzaDuplicati(remoto.dati.storico, caricaStoricoReport(), chiaveStorico);
                 const sessioniUnite = unisciSenzaDuplicati(remoto.dati.sessioni, caricaSessioniScarico(), chiaveSessione);
                 const pulito = applicaRetentionCondivisa(storicoUnito, sessioniUnite);
+                presenzeFinali = aggiornaPresenze(remoto.dati.presenze);
 
                 salvaStoricoReport(pulito.storico);
                 salvaSessioniScarico(pulito.sessioni);
 
-                const invariato = pulito.storico.length === remoto.dati.storico.length && pulito.sessioni.length === remoto.dati.sessioni.length;
+                const invariato = pulito.storico.length === remoto.dati.storico.length
+                    && pulito.sessioni.length === remoto.dati.sessioni.length
+                    && remoto.dati.presenze[DEVICE_ID] === presenzeFinali[DEVICE_ID]
+                    && Object.keys(presenzeFinali).length === Object.keys(remoto.dati.presenze).length;
                 if (invariato) break;
 
-                const ok = await githubScriviFile({ storico: pulito.storico, sessioni: pulito.sessioni }, remoto.sha);
+                const ok = await githubScriviFile({ versione: VERSIONE_DATI, storico: pulito.storico, sessioni: pulito.sessioni, presenze: presenzeFinali }, remoto.sha);
                 if (ok) break;
+                await attesa(400 * (tentativo + 1) + Math.random() * 300);
             }
+            aggiornaStatoSync(true, contaUtentiOggi(presenzeFinali));
         } catch (e) {
             console.warn("[YOS TOOL] Sincronizzazione fallita:", e.message);
+            aggiornaStatoSync(false, null);
         } finally {
             sincronizzazioneInCorso = false;
             if (sincronizzazionePendente) { sincronizzazionePendente = false; pianificaSincronizzazione(2000); }
@@ -1878,6 +1955,7 @@
 
     async function avviaTool() {
         GITHUB_SYNC.TOKEN = await ottieniTokenAccesso();
+        aggiornaStatoSync(false, null);
 
         try { scanBlocchi(document.body); } catch (e) {}
         try { pulisciStoricoVecchio(); } catch (e) {}
@@ -1895,14 +1973,20 @@
             try { aggiornaPannelloOutbound(); } catch (e) {}
         }
 
+        function eNodoInterno(n) {
+            if (!n || n.nodeType !== 1) return false;
+            if (n.id && n.id.indexOf("tnt-") === 0) return true;
+            return !!(n.closest && n.closest('[id^="tnt-"], .tnt-panel, .cc-menu-button'));
+        }
+
         const observer = new MutationObserver((mutations) => {
             for (const m of mutations) {
                 if (m.type === "childList") {
-                    m.addedNodes.forEach((n) => { if (n.nodeType === 1) nodiDaControllare.add(n); });
+                    m.addedNodes.forEach((n) => { if (n.nodeType === 1 && !eNodoInterno(n)) nodiDaControllare.add(n); });
                 } else if (m.type === "characterData" && m.target.parentElement) {
-                    nodiDaControllare.add(m.target.parentElement);
+                    if (!eNodoInterno(m.target.parentElement)) nodiDaControllare.add(m.target.parentElement);
                 } else if (m.type === "attributes" && m.target.nodeType === 1) {
-                    nodiDaControllare.add(m.target);
+                    if (!eNodoInterno(m.target)) nodiDaControllare.add(m.target);
                 }
             }
             clearTimeout(debounceTimer);
