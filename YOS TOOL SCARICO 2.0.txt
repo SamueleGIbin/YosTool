@@ -4,7 +4,8 @@
 // @version      3.7
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync GitHub tra postazioni + Esportazione Report Excel completo
 // @match        https://yos.apps.tnt.com/hub-overview*
-// @grant        none
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
 // @downloadURL  https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
 // ==/UserScript==
@@ -12,32 +13,34 @@
 (function () {
     'use strict';
 
-    // ==== CONFIG SINCRONIZZAZIONE DATI TRA POSTAZIONI (GitHub, nessun servizio esterno) ====
-    // Compilare TOKEN una sola volta con un GitHub Personal Access Token (fine-grained,
-    // permesso "Contents: Read and write" limitato al solo repo OWNER/REPO) per attivare
-    // la condivisione automatica dei dati tra tutte le postazioni che aprono lo script.
-    // Con TOKEN vuoto il tool resta 100% locale (comportamento identico a prima).
     const GITHUB_SYNC = {
         ATTIVO: true,
         TOKEN: "",
         OWNER: "SamueleGibin",
-        REPO: "YosTool",
+        REPO: "YosTool-data",
         BRANCH: "main",
-        PATH: "dati/turno-condiviso.json",
+        PATH: "turno-condiviso.json",
         INTERVALLO_MS: 3 * 60 * 1000
     };
 
-    const GIORNI_STORICO_TREND = 30; // profondita' storico conservato (serve al trend)
-    const GIORNI_MEDIA_TREND = 7;    // giorni usati per calcolare la media storica di confronto
+    function ottieniTokenGitHub() {
+        let token = "";
+        try { token = GM_getValue("yos_github_token", ""); } catch (e) {}
+        if (!token && GITHUB_SYNC.ATTIVO) {
+            const inserito = prompt("YOS TOOL - incolla il token di sincronizzazione dati (lascia vuoto per uso solo locale):");
+            if (inserito && inserito.trim()) {
+                token = inserito.trim();
+                try { GM_setValue("yos_github_token", token); } catch (e) {}
+            }
+        }
+        return token;
+    }
+    window.__tntResetToken = function () { try { GM_setValue("yos_github_token", ""); } catch (e) {} alert("Token rimosso, ricarica la pagina."); };
+    GITHUB_SYNC.TOKEN = ottieniTokenGitHub();
 
-    // ==== DEBUG ENDPOINT DISCOVERY ====
-    // Per scoprire endpoint aggiuntivi (yard, parcheggi, ecc.) senza dover aprire manualmente
-    // il tab Network del browser ogni volta: da console eseguire
-    //   window.__tntDebugEndpoints = true
-    // poi interagire con la pagina (aprire/aggiornare yard o parcheggio). Ogni chiamata XHR/fetch
-    // intercettata verrà loggata in console con url e un estratto del body, prefissata da
-    // "[YOS TOOL][debug endpoint]" (evidenziata se contiene parole chiave plausibili).
-    // Per disattivare: window.__tntDebugEndpoints = false
+    const GIORNI_STORICO_TREND = 30;
+    const GIORNI_MEDIA_TREND = 7;
+
     window.__tntDebugEndpoints = window.__tntDebugEndpoints || false;
     const PAROLE_CHIAVE_ENDPOINT_CANDIDATI = ["yard", "parking", "parcheggio", "trailer", "spot", "lot", "gate"];
     function logDebugEndpoint(urlStr, testoBody) {
@@ -213,7 +216,7 @@
         const fine = new Date(fineIso).getTime();
         if (isNaN(inizio) || isNaN(fine) || fine <= inizio) return;
         const durataMinuti = Math.round((fine - inizio) / 60000);
-        if (durataMinuti <= 0 || durataMinuti > 12 * 60) return; // scarta valori anomali
+        if (durataMinuti <= 0 || durataMinuti > 12 * 60) return;
         const sessioni = caricaSessioniScarico();
         sessioni.push({ lato: attuale.lato, doorNumber, unitId: attuale.unitId, inizioIso: attuale.inizioIso, fineIso, durataMinuti });
         salvaSessioniScarico(sessioni);
@@ -672,8 +675,6 @@
                 if (vecchia) vecchia.remove();
                 const vecchioAvviso = sezione.querySelector(".tnt-avviso-ritardo");
                 if (vecchioAvviso) vecchioAvviso.remove();
-                // Le baie di Carico (301-456) sono gestite solo dal traduttore destinazione + orario arrivo:
-                // niente Turno/Tipo Cutoff/Orario Cutoff/avviso ritardo, che riguardano solo lo Scarico.
                 if (eBaiaCarico) return;
                 if (!codiceOrigine || testoArrivo.toUpperCase().includes("N/A")) return;
                 const riga = document.createElement("div");
@@ -814,7 +815,6 @@
         try { localStorage.setItem(STORAGE_KEY_STORICO, JSON.stringify(dati)); } catch (e) {}
     }
 
-    // ==== SINCRONIZZAZIONE CONDIVISA TRA POSTAZIONI (GitHub Contents API) ====
     function utf8ParaBase64(str) { return btoa(unescape(encodeURIComponent(str))); }
     function base64ParaUtf8(b64) { return decodeURIComponent(escape(atob(b64))); }
 
@@ -984,7 +984,6 @@
         pianificaSincronizzazione(5000);
     }
 
-    // ==== LIBRERIA EXCEL (caricata on-demand dal CDN, solo quando serve scaricare il report) ====
     function caricaLibreriaXLSX() {
         return new Promise((resolve, reject) => {
             if (window.XLSX) { resolve(window.XLSX); return; }
@@ -1053,7 +1052,6 @@
         let XLSX;
         try { XLSX = await caricaLibreriaXLSX(); } catch (e) { alert(e.message); return; }
 
-        // Foglio 1: storico completo, tutte le colonne raccolte (Carico incluso se presente)
         const righeStorico = storico.map((r) => ({
             "Data": r.data,
             "Timestamp": r.timestampIso,
@@ -1072,7 +1070,6 @@
             "Cutoff Originale (se slittato)": r.cutoffOriginaleTesto || ""
         }));
 
-        // Foglio 2: sessioni di scarico per lato (inizio/fine/durata), per analisi tempi puntuali
         const sessioni = filtraPerPeriodo(caricaSessioniScarico(), dataInizioStr, dataFineStr, "inizioIso");
         const righeSessioni = sessioni.map((s) => ({
             "Lato": s.lato,
@@ -1083,7 +1080,6 @@
             "Durata (minuti)": s.durataMinuti
         }));
 
-        // Foglio 3: riepilogo statistiche già aggregate per lo stesso periodo esportato
         const stat = calcolaStatisticheTurno(dataInizioStr, null, dataFineStr, null);
         const righeStat = [];
         righeStat.push({ Indicatore: "Camion presi in carico nel periodo (Scarico)", Valore: stat.camionPresiInCarico, Campioni: "" });
@@ -1112,7 +1108,6 @@
         XLSX.writeFile(wb, `REPORT_TURNO_YOS${suffisso}.xlsx`);
     }
 
-    // ==== STATISTICHE DI TURNO (calcolate dallo storico già raccolto, nessun dato nuovo da tracciare) ====
 
     function filtraStoricoPerPeriodo(storico, dataInizioStr, dataFineStr) {
         return filtraPerPeriodo(storico, dataInizioStr, dataFineStr, "timestampIso");
@@ -1164,7 +1159,6 @@
         return righe;
     }
 
-    // Esclude dai raggruppamenti le chiavi non valide/sconosciute (nessun N/A in vista)
     function calcolaTempoScaricoPerBaia(dataInizioStr, oraInizioStr, dataFineStr, oraFineStr) {
         const sessioni = filtraPerPeriodoConOra(caricaSessioniScarico(), dataInizioStr, oraInizioStr, dataFineStr, oraFineStr, "inizioIso");
         const gruppi = new Map();
@@ -1188,7 +1182,7 @@
     }
 
     function calcolaFinestraTrend(dataInizioStr) {
-        if (!dataInizioStr) return null; // "tutto lo storico" non ha una finestra di confronto sensata
+        if (!dataInizioStr) return null;
         const inizioPeriodo = new Date(dataInizioStr + "T00:00:00");
         if (isNaN(inizioPeriodo.getTime())) return null;
         const fineTrend = new Date(inizioPeriodo.getTime() - 24 * 60 * 60 * 1000);
@@ -1228,7 +1222,6 @@
     function calcolaStatisticheTurno(dataInizioStr, oraInizioStr, dataFineStr, oraFineStr) {
         let storico = caricaStoricoReport();
         storico = filtraPerPeriodoConOra(storico, dataInizioStr, oraInizioStr, dataFineStr, oraFineStr, "timestampIso");
-        // Solo baie Scarico/Parcheggio hanno senso per queste statistiche (Carico non ha cutoff/ritardo)
         const storicoScaricoParcheggio = storico.filter((r) => {
             const cat = categoriaBaia(r.doorNumber);
             return cat === "Scarico" || cat === "Parcheggio";
@@ -1275,7 +1268,6 @@
             }
             let html = "";
 
-            // 1) Attesa media in parcheggio
             html += '<div class="tnt-group-label">Attesa media in parcheggio</div>';
             if (stat.attesaParcheggio.mediaMinuti !== null) {
                 let deltaParcheggioHtml = "";
@@ -1289,7 +1281,6 @@
                 html += '<div class="tnt-empty">Nessun camion tracciato parcheggio&rarr;baia nel periodo</div>';
             }
 
-            // 2) Tempo medio di scarico per lato
             html += '<div class="tnt-group-label">Tempo medio di scarico per lato</div>';
             const latiConDati = stat.perLato.filter((r) => r.mediaMinuti !== null);
             if (latiConDati.length === 0) {
@@ -1315,7 +1306,6 @@
                 });
             }
 
-            // 2bis) Baie più lente (dettaglio per singola baia, non nascosto dalla media di lato)
             html += '<div class="tnt-group-label">Baie più lente (dettaglio per baia)</div>';
             const baieConDati = stat.perBaia.filter((r) => r.mediaMinuti !== null);
             if (baieConDati.length === 0) {
@@ -1332,7 +1322,6 @@
                 });
             }
 
-            // 3) % ritardo per turno
             html += '<div class="tnt-group-label">% ritardo per turno</div>';
             if (stat.perTurno.length === 0) {
                 html += '<div class="tnt-empty">Nessun dato</div>';
@@ -1343,7 +1332,6 @@
                 });
             }
 
-            // 4) % ritardo per cliente (codice destinazione, non tradotto)
             html += '<div class="tnt-group-label">% ritardo per cliente (codice destinazione)</div>';
             if (stat.perCliente.length === 0) {
                 html += '<div class="tnt-empty">Nessun dato</div>';
@@ -1354,7 +1342,6 @@
                 });
             }
 
-            // 5) Camion presi in carico nel periodo
             html += '<div class="tnt-group-label">Camion presi in carico nel periodo</div>';
             html += '<div class="tnt-card"><div class="tnt-card-title">' + stat.camionPresiInCarico + ' camion</div><div class="tnt-card-sub">assegnati a una baia di Scarico nel periodo selezionato</div></div>';
 
@@ -1425,7 +1412,6 @@
         rigaNuova.className = "row door-info__movmt-section-row tnt-custom-info-row";
         rigaNuova.style.marginTop = "10px";
 
-        // Baie di Carico: solo orario arrivo camion, niente countdown/cutoff (non pertinente al Carico).
         if (eBaiaCarico) {
             rigaNuova.appendChild(creaColTurno("Orario Arrivo Camion", valoreArrivo, "col-12"));
             rigaRemarks.insertAdjacentElement("afterend", rigaNuova);
