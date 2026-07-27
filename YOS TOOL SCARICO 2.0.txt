@@ -4,8 +4,7 @@
 // @version      3.7
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync GitHub tra postazioni + Esportazione Report Excel completo
 // @match        https://yos.apps.tnt.com/hub-overview*
-// @grant        GM_setValue
-// @grant        GM_getValue
+// @grant        none
 // @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
 // @downloadURL  https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
 // ==/UserScript==
@@ -17,26 +16,94 @@
         ATTIVO: true,
         TOKEN: "",
         OWNER: "SamueleGibin",
-        REPO: "YosTool-data",
+        REPO: "YosTool",
         BRANCH: "main",
-        PATH: "turno-condiviso.json",
+        PATH: "dati/turno-condiviso.json",
         INTERVALLO_MS: 3 * 60 * 1000
     };
 
-    function ottieniTokenGitHub() {
-        let token = "";
-        try { token = GM_getValue("yos_github_token", ""); } catch (e) {}
-        if (!token && GITHUB_SYNC.ATTIVO) {
-            const inserito = prompt("YOS TOOL - incolla il token di sincronizzazione dati (lascia vuoto per uso solo locale):");
-            if (inserito && inserito.trim()) {
-                token = inserito.trim();
-                try { GM_setValue("yos_github_token", token); } catch (e) {}
-            }
-        }
-        return token;
+    const ACCESS_GATE = {
+        SALT_B64: "",
+        IV_B64: "",
+        CIPHERTEXT_B64: ""
+    };
+    const SESSION_KEY_GATE = "yosToolGateToken";
+
+    function b64ToBuf(b64) {
+        const bin = atob(b64);
+        const buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        return buf.buffer;
     }
-    window.__tntResetToken = function () { try { GM_setValue("yos_github_token", ""); } catch (e) {} alert("Token rimosso, ricarica la pagina."); };
-    GITHUB_SYNC.TOKEN = ottieniTokenGitHub();
+
+    async function derivaChiave(password, saltBuf) {
+        const encoder = new TextEncoder();
+        const materialeBase = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
+        return crypto.subtle.deriveKey(
+            { name: "PBKDF2", salt: saltBuf, iterations: 200000, hash: "SHA-256" },
+            materialeBase,
+            { name: "AES-GCM", length: 256 },
+            false,
+            ["decrypt"]
+        );
+    }
+
+    async function provaSblocco(password) {
+        const saltBuf = b64ToBuf(ACCESS_GATE.SALT_B64);
+        const ivBuf = b64ToBuf(ACCESS_GATE.IV_B64);
+        const cipherBuf = b64ToBuf(ACCESS_GATE.CIPHERTEXT_B64);
+        const chiave = await derivaChiave(password, saltBuf);
+        const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivBuf }, chiave, cipherBuf);
+        return new TextDecoder().decode(plainBuf);
+    }
+
+    function mostraSchermataAccesso() {
+        return new Promise((resolve) => {
+            const overlay = document.createElement("div");
+            overlay.id = "tnt-gate-overlay";
+            overlay.style.cssText = "position:fixed;inset:0;background:#1c1c1e;z-index:999999;display:flex;align-items:center;justify-content:center;font-family:sans-serif;";
+            overlay.innerHTML =
+                '<div style="background:#2c2c2e;padding:32px;border-radius:12px;width:280px;text-align:center;">' +
+                '<div style="color:#fff;font-size:16px;margin-bottom:16px;">YOS TOOL</div>' +
+                '<input id="tnt-gate-input" type="password" style="width:100%;box-sizing:border-box;padding:10px;border-radius:6px;border:1px solid #555;background:#1c1c1e;color:#fff;margin-bottom:10px;" placeholder="Codice accesso">' +
+                '<button id="tnt-gate-btn" style="width:100%;padding:10px;border-radius:6px;border:none;background:#0A84FF;color:#fff;cursor:pointer;">Entra</button>' +
+                '<div id="tnt-gate-errore" style="color:#ff453a;font-size:12px;margin-top:10px;height:14px;"></div>' +
+                '</div>';
+            document.body.appendChild(overlay);
+
+            const input = overlay.querySelector("#tnt-gate-input");
+            const btn = overlay.querySelector("#tnt-gate-btn");
+            const errore = overlay.querySelector("#tnt-gate-errore");
+            input.focus();
+
+            async function tenta() {
+                errore.textContent = "";
+                const pwd = input.value;
+                if (!pwd) return;
+                try {
+                    const token = await provaSblocco(pwd);
+                    try { localStorage.setItem(SESSION_KEY_GATE, token); } catch (e) {}
+                    overlay.remove();
+                    resolve(token);
+                } catch (e) {
+                    errore.textContent = "Codice errato";
+                    input.value = "";
+                    input.focus();
+                }
+            }
+            btn.addEventListener("click", tenta);
+            input.addEventListener("keydown", (e) => { if (e.key === "Enter") tenta(); });
+        });
+    }
+
+    async function ottieniTokenAccesso() {
+        if (!ACCESS_GATE.CIPHERTEXT_B64) return "";
+        try {
+            const cache = localStorage.getItem(SESSION_KEY_GATE);
+            if (cache) return cache;
+        } catch (e) {}
+        return mostraSchermataAccesso();
+    }
 
     const GIORNI_STORICO_TREND = 30;
     const GIORNI_MEDIA_TREND = 7;
@@ -1834,42 +1901,48 @@
         if (doorNumber) baiaSelezionata = doorNumber;
     }, true);
 
-    try { scanBlocchi(document.body); } catch (e) {}
-    try { pulisciStoricoVecchio(); } catch (e) {}
-    try { initIcone(); } catch (e) {}
-    try { processaTripDetails(); } catch (e) {}
+    async function avviaTool() {
+        GITHUB_SYNC.TOKEN = await ottieniTokenAccesso();
 
-    let debounceTimer = null;
-    const nodiDaControllare = new Set();
-    function eseguiControlliPesanti() {
-        const nodi = Array.from(nodiDaControllare);
-        nodiDaControllare.clear();
-        try { nodi.forEach((n) => { if (document.body.contains(n)) scanBlocchi(n); }); } catch (e) {}
+        try { scanBlocchi(document.body); } catch (e) {}
+        try { pulisciStoricoVecchio(); } catch (e) {}
         try { initIcone(); } catch (e) {}
         try { processaTripDetails(); } catch (e) {}
-        try { aggiornaPannelloOutbound(); } catch (e) {}
+
+        let debounceTimer = null;
+        const nodiDaControllare = new Set();
+        function eseguiControlliPesanti() {
+            const nodi = Array.from(nodiDaControllare);
+            nodiDaControllare.clear();
+            try { nodi.forEach((n) => { if (document.body.contains(n)) scanBlocchi(n); }); } catch (e) {}
+            try { initIcone(); } catch (e) {}
+            try { processaTripDetails(); } catch (e) {}
+            try { aggiornaPannelloOutbound(); } catch (e) {}
+        }
+
+        const observer = new MutationObserver((mutations) => {
+            for (const m of mutations) {
+                if (m.type === "childList") {
+                    m.addedNodes.forEach((n) => { if (n.nodeType === 1) nodiDaControllare.add(n); });
+                } else if (m.type === "characterData" && m.target.parentElement) {
+                    nodiDaControllare.add(m.target.parentElement);
+                } else if (m.type === "attributes" && m.target.nodeType === 1) {
+                    nodiDaControllare.add(m.target);
+                }
+            }
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(eseguiControlliPesanti, 600);
+        });
+        observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class"] });
+
+        setInterval(aggiornaPannelloOutbound, 15000);
+        setInterval(aggiornaPannelloScaricoSeAperto, 15000);
+        setInterval(pulisciStoricoVecchio, 60 * 60 * 1000);
+        setInterval(pulisciRegistriSenzaBaia, 10 * 60 * 1000);
+        setInterval(elaboraCodaVerificaBaie, 4000);
+        pianificaSincronizzazione(3000);
+        setInterval(sincronizzaDati, GITHUB_SYNC.INTERVALLO_MS);
     }
 
-    const observer = new MutationObserver((mutations) => {
-        for (const m of mutations) {
-            if (m.type === "childList") {
-                m.addedNodes.forEach((n) => { if (n.nodeType === 1) nodiDaControllare.add(n); });
-            } else if (m.type === "characterData" && m.target.parentElement) {
-                nodiDaControllare.add(m.target.parentElement);
-            } else if (m.type === "attributes" && m.target.nodeType === 1) {
-                nodiDaControllare.add(m.target);
-            }
-        }
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(eseguiControlliPesanti, 600);
-    });
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class"] });
-
-    setInterval(aggiornaPannelloOutbound, 15000);
-    setInterval(aggiornaPannelloScaricoSeAperto, 15000);
-    setInterval(pulisciStoricoVecchio, 60 * 60 * 1000);
-    setInterval(pulisciRegistriSenzaBaia, 10 * 60 * 1000);
-    setInterval(elaboraCodaVerificaBaie, 4000);
-    pianificaSincronizzazione(3000);
-    setInterval(sincronizzaDati, GITHUB_SYNC.INTERVALLO_MS);
+    avviaTool();
 })();
