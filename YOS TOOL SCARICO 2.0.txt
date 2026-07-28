@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         YOS TOOL 2.0
 // @namespace    http://tampermonkey.net/
-// @version      3.7
+// @version      3.8
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync GitHub tra postazioni + Esportazione Report Excel completo
 // @match        https://yos.apps.tnt.com/hub-overview*
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      api.github.com
 // @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
 // @downloadURL  https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
 // ==/UserScript==
@@ -14,52 +15,13 @@
 
     const GITHUB_SYNC = {
         ATTIVO: true,
-        TOKEN: "",
+        TOKEN: "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",
         OWNER: "SamueleGibin",
         REPO: "YosTool",
         BRANCH: "main",
         PATH: "dati/turno-condiviso.json",
         INTERVALLO_MS: 3 * 60 * 1000
     };
-
-    const CHIAVE_TOKEN_LOCALE = "yosToolToken";
-
-    function mostraSchermataAccesso() {
-        return new Promise((resolve) => {
-            const overlay = document.createElement("div");
-            overlay.id = "tnt-gate-overlay";
-            overlay.style.cssText = "position:fixed;inset:0;background:#1c1c1e;z-index:999999;display:flex;align-items:center;justify-content:center;font-family:sans-serif;";
-            overlay.innerHTML =
-                '<div style="background:#2c2c2e;padding:32px;border-radius:12px;width:280px;text-align:center;">' +
-                '<div style="color:#fff;font-size:16px;margin-bottom:16px;">YOS TOOL</div>' +
-                '<input id="tnt-gate-input" type="password" style="width:100%;box-sizing:border-box;padding:10px;border-radius:6px;border:1px solid #555;background:#1c1c1e;color:#fff;margin-bottom:10px;" placeholder="Incolla la stringa">' +
-                '<button id="tnt-gate-btn" style="width:100%;padding:10px;border-radius:6px;border:none;background:#0A84FF;color:#fff;cursor:pointer;">Entra</button>' +
-                '</div>';
-            document.body.appendChild(overlay);
-
-            const input = overlay.querySelector("#tnt-gate-input");
-            const btn = overlay.querySelector("#tnt-gate-btn");
-            input.focus();
-
-            function tenta() {
-                const valore = input.value.trim();
-                if (!valore) return;
-                try { localStorage.setItem(CHIAVE_TOKEN_LOCALE, valore); } catch (e) {}
-                overlay.remove();
-                resolve(valore);
-            }
-            btn.addEventListener("click", tenta);
-            input.addEventListener("keydown", (e) => { if (e.key === "Enter") tenta(); });
-        });
-    }
-
-    async function ottieniTokenAccesso() {
-        try {
-            const cache = localStorage.getItem(CHIAVE_TOKEN_LOCALE);
-            if (cache) return cache;
-        } catch (e) {}
-        return mostraSchermataAccesso();
-    }
 
     const GIORNI_STORICO_TREND = 30;
     const GIORNI_MEDIA_TREND = 7;
@@ -128,7 +90,13 @@
 
     const cacheMovimentiPerUnit = new Map();
     const cacheCutoffPerBaia = new Map();
+    const cacheRemarksPerBaia = new Map();
     const unitGiaScaricati = new Map();
+    const SCADENZA_REMARKS_ORE = 12;
+
+    function remarksEsclusiOrologio(voce) {
+        return !!(voce && voce.testo && /buffer|spazzatura/i.test(voce.testo));
+    }
 
     function sembraListaMovimenti(dati) {
         return Array.isArray(dati) && dati.length > 0 && dati[0] && typeof dati[0] === "object"
@@ -219,7 +187,7 @@
         try { const raw = localStorage.getItem(STORAGE_KEY_SESSIONI_SCARICO); return raw ? JSON.parse(raw) : []; } catch (e) { return []; }
     }
     function salvaSessioniScarico(dati) {
-        try { localStorage.setItem(STORAGE_KEY_SESSIONI_SCARICO, JSON.stringify(dati)); } catch (e) {}
+        salvaArrayConPulizia(STORAGE_KEY_SESSIONI_SCARICO, dati, (s) => s.inizioIso);
     }
 
     function avviaSessioneScarico(doorNumber, unitId, orarioIso) {
@@ -396,7 +364,7 @@
         "DFT*": "GERMANIA", "DNG": "GERMANIA", "DNG*": "NORIMBERGA", "VNZ": "VICENZA",
         "VE1": "VENEZIA", "XWT": "VIENNA", "WA1": "VARSAVIA", "VRN": "VERONA",
         "BO2": "BOLOGNA", "BO1": "BOLOGNA", "B7Q": "BOLOGNA", "PSR": "BOLOGNA",
-        "ZRO": "BOLOGNA", "BZQ": "BELGIO", "QAR": "OLANDA", "QAL": "ALEX",
+        "ZRO": "BOLOGNA", "BZQ": "BELGIO", "QAR": "OLANDA", "QAL": "ALESSANDRIA",
         "QVA": "VARESE", "MM1": "MILANO-MEGA", "MILA": "MILANO NEW", "ISV": "SAVONA",
         "IOE": "OMEGNA", "IBD": "BASSANO", "MDA": "MODENA", "PMF": "PARMA",
         "BEA": "BIELLA", "MZ1": "MONZA", "IIM": "IBERIA", "VBS": "BRESCIA",
@@ -422,8 +390,19 @@
     ];
     const SOGLIA_OUTBOUND_MINUTI = 60;
     const SOGLIA_SCARICO_MINUTI = 500;
-    const MARGINE_MINIMO_LAVORAZIONE_MINUTI = 150;
+    const MARGINE_MINIMO_DOMESTICO_MINUTI = 60;
+    const MARGINE_MINIMO_INTERNAZIONALE_MINUTI = 150;
+    const SOGLIA_RIAPERTURA_MARGINE_MINUTI = 150;
     const ORARIO_RIAPERTURA_DOMENICA_MINUTI = 20 * 60 + 30;
+
+    const CODICI_INTERNAZIONALI = new Set([
+        "BCN", "XXJ", "LUG", "MAD", "HNJ", "MRS", "PRG", "MV9", "LYS", "SKG", "ATH",
+        "DFT", "DFT*", "DNG", "DNG*", "XWT", "WA1", "BZQ", "QAR", "IIM", "LJU", "ZRH", "ECL", "KCW"
+    ]);
+
+    function margineMinimoPerCodice(codice) {
+        return CODICI_INTERNAZIONALI.has(codice) ? MARGINE_MINIMO_INTERNAZIONALE_MINUTI : MARGINE_MINIMO_DOMESTICO_MINUTI;
+    }
 
     function categoriaBaia(door) {
         if (/^P/i.test(door)) return "Parcheggio";
@@ -455,11 +434,11 @@
         const minutiGiorno = data.getHours() * 60 + data.getMinutes();
         if (giorno === 5 && minutiGiorno >= 2 * 60) return true;
         if (giorno === 6) return true;
-        if (giorno === 0 && minutiGiorno < ORARIO_RIAPERTURA_DOMENICA_MINUTI + MARGINE_MINIMO_LAVORAZIONE_MINUTI) return true;
+        if (giorno === 0 && minutiGiorno < ORARIO_RIAPERTURA_DOMENICA_MINUTI + SOGLIA_RIAPERTURA_MARGINE_MINUTI) return true;
         return false;
     }
 
-    function trovaProssimoCutoffConMargine(cutoffBase, arrivoPortaReale) {
+    function trovaProssimoCutoffConMargine(cutoffBase, arrivoPortaReale, margineMinimo) {
         const candidati = [];
         for (let offset = 0; offset <= 5; offset++) {
             SLOT_CUTOFF_UNICI.forEach((slot) => {
@@ -470,12 +449,13 @@
         candidati.sort((a, b) => a.getTime() - b.getTime());
         for (const d of candidati) {
             const margine = (d.getTime() - arrivoPortaReale.getTime()) / 60000;
-            if (margine >= MARGINE_MINIMO_LAVORAZIONE_MINUTI) return d;
+            if (margine >= margineMinimo) return d;
         }
         return candidati.length > 0 ? candidati[candidati.length - 1] : null;
     }
 
     function calcolaCutoffPerCodice(codice, arrivo, arrivoPortaReale) {
+        const margineMinimo = margineMinimoPerCodice(codice);
         const candidati = CATEGORIE.filter((c) => c.codici.includes(codice));
         if (candidati.length === 0) return null;
         const choices = [];
@@ -494,7 +474,7 @@
         if (choices.length > 1) {
             for (let i = 0; i < choices.length; i++) {
                 const diffMinutiArrivoCutoff = (choices[i].cutoffDate.getTime() - arrivo.getTime()) / 60000;
-                if (diffMinutiArrivoCutoff >= MARGINE_MINIMO_LAVORAZIONE_MINUTI) { risultato = choices[i]; break; }
+                if (diffMinutiArrivoCutoff >= margineMinimo) { risultato = choices[i]; break; }
             }
             if (!risultato) risultato = choices[0];
         } else {
@@ -503,13 +483,14 @@
 
         if (arrivoPortaReale && !isNaN(arrivoPortaReale.getTime())) {
             const margineReale = (risultato.cutoffDate.getTime() - arrivoPortaReale.getTime()) / 60000;
-            if (margineReale < MARGINE_MINIMO_LAVORAZIONE_MINUTI) {
-                const nuovoCutoff = trovaProssimoCutoffConMargine(risultato.cutoffDate, arrivoPortaReale);
+            if (margineReale < margineMinimo) {
+                const nuovoCutoff = trovaProssimoCutoffConMargine(risultato.cutoffDate, arrivoPortaReale, margineMinimo);
                 if (nuovoCutoff) {
-                    risultato = { cat: risultato.cat, cutoffDate: nuovoCutoff, cutoffOriginale: risultato.cutoffDate, ritardo: true };
+                    risultato = { cat: risultato.cat, cutoffDate: nuovoCutoff, cutoffOriginale: risultato.cutoffDate, ritardo: true, margineMinimo: margineMinimo };
                 }
             }
         }
+        if (risultato) risultato.margineMinimo = margineMinimo;
         return risultato;
     }
 
@@ -651,6 +632,14 @@
                     return;
                 }
                 const eBaiaCarico = baiaSelezionata && categoriaBaia(baiaSelezionata) === "Carico";
+                if (baiaSelezionata) {
+                    const remarksEl = trovaValorePerChiave(sezione, "YOS Remarks") || trovaValorePerChiave(sezione, "Arrival Remarks");
+                    const testoRemarks = remarksEl ? (remarksEl.dataset && remarksEl.dataset.tntCode ? remarksEl.dataset.tntCode : remarksEl.textContent.trim()) : "";
+                    const eraEscluso = remarksEsclusiOrologio(cacheRemarksPerBaia.get(baiaSelezionata));
+                    if (testoRemarks) cacheRemarksPerBaia.set(baiaSelezionata, { testo: testoRemarks, ts: new Date().toISOString() });
+                    else cacheRemarksPerBaia.delete(baiaSelezionata);
+                    if (eraEscluso !== remarksEsclusiOrologio(cacheRemarksPerBaia.get(baiaSelezionata))) pianificaSincronizzazione(800);
+                }
                 const origineEl = trovaValorePerChiave(sezione, "Origin");
                 const arrivoEl = trovaValorePerChiave(sezione, "Sched. Arrival");
                 const actualArrivoEl = trovaValorePerChiave(sezione, "Actual Arrival");
@@ -714,6 +703,12 @@
                     riga.appendChild(creaColTurno("Orario Cutoff", "N/A"));
                 }
                 sezione.appendChild(riga);
+                if (!risultato && codiceOrigine && !CATEGORIE.some((c) => c.codici.includes(codiceOrigine))) {
+                    const avvisoCodice = document.createElement("div");
+                    avvisoCodice.className = "row door-info__movmt-section-row tnt-avviso-ritardo";
+                    avvisoCodice.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Codice origine non riconosciuto: <strong>' + escapeHtml(codiceOrigine) + '</strong> \u2014 nessun cutoff calcolabile, va censito</div></div>';
+                    sezione.appendChild(avvisoCodice);
+                }
                 if (risultato && risultato.ritardo && risultato.cutoffOriginale) {
                     const hhO = String(risultato.cutoffOriginale.getHours()).padStart(2, "0");
                     const mmO = String(risultato.cutoffOriginale.getMinutes()).padStart(2, "0");
@@ -721,7 +716,7 @@
                     const mmN = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
                     const avviso = document.createElement("div");
                     avviso.className = "row door-info__movmt-section-row tnt-avviso-ritardo";
-                    avviso.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Cutoff spostato per arrivo in ritardo: <strong>' + hhO + ':' + mmO + '</strong> &rarr; <strong>' + hhN + ':' + mmN + '</strong> (meno di ' + MARGINE_MINIMO_LAVORAZIONE_MINUTI + ' minuti di lavorazione disponibili)</div></div>';
+                    avviso.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Cutoff spostato per arrivo in ritardo: <strong>' + hhO + ':' + mmO + '</strong> &rarr; <strong>' + hhN + ':' + mmN + '</strong> (meno di ' + (risultato.margineMinimo || MARGINE_MINIMO_INTERNAZIONALE_MINUTI) + ' minuti di lavorazione disponibili)</div></div>';
                     sezione.appendChild(avviso);
                 }
             } catch (e) {}
@@ -799,7 +794,7 @@
         try { const raw = localStorage.getItem(STORAGE_KEY_ARRIVI); return raw ? JSON.parse(raw) : {}; } catch (e) { return {}; }
     }
     function salvaArriviBaia(dati) {
-        try { localStorage.setItem(STORAGE_KEY_ARRIVI, JSON.stringify(dati)); } catch (e) {}
+        scriviLocalStorageSicuro(STORAGE_KEY_ARRIVI, JSON.stringify(dati));
     }
 
     function registraArrivoDaTripDetailsSeMancante(doorNumber, codiceOrigine, tripId, testoActualArrivo, risultato) {
@@ -835,11 +830,69 @@
         try { const raw = localStorage.getItem(STORAGE_KEY_STORICO); return raw ? JSON.parse(raw) : []; } catch (e) { return []; }
     }
     function salvaStoricoReport(dati) {
-        try { localStorage.setItem(STORAGE_KEY_STORICO, JSON.stringify(dati)); } catch (e) {}
+        salvaArrayConPulizia(STORAGE_KEY_STORICO, dati, (r) => r.timestampIso);
     }
 
     function utf8ParaBase64(str) { return btoa(unescape(encodeURIComponent(str))); }
     function base64ParaUtf8(b64) { return decodeURIComponent(escape(atob(b64))); }
+
+    function scriviLocalStorageSicuro(chiave, valore) {
+        try {
+            localStorage.setItem(chiave, valore);
+            return true;
+        } catch (e) {
+            console.warn("[YOS TOOL] Salvataggio locale fallito (quota piena?):", chiave, e.message);
+            avvisaStorageLocalePieno();
+            return false;
+        }
+    }
+
+    function salvaArrayConPulizia(chiave, array, chiaveTempoFn) {
+        let arr = array.slice().sort((a, b) => new Date(chiaveTempoFn(b)).getTime() - new Date(chiaveTempoFn(a)).getTime());
+        let scartati = false;
+        while (arr.length > 0) {
+            try {
+                localStorage.setItem(chiave, JSON.stringify(arr));
+                if (scartati) {
+                    console.warn("[YOS TOOL] Quota locale piena: rimossi i " + (array.length - arr.length) + " record piu' vecchi di", chiave);
+                    avvisaStorageQuasiPieno();
+                }
+                return arr;
+            } catch (e) {
+                scartati = true;
+                const daRimuovere = Math.max(1, Math.floor(arr.length * 0.1));
+                arr = arr.slice(0, arr.length - daRimuovere);
+            }
+        }
+        try { localStorage.removeItem(chiave); } catch (e) {}
+        avvisaStorageLocalePieno();
+        return arr;
+    }
+
+    function avvisaStorageQuasiPieno() {
+        creaBadgeSync();
+        const dot = document.getElementById("tnt-badge-dot");
+        const testo = document.getElementById("tnt-badge-testo");
+        if (dot) dot.style.background = "#FF9F0A";
+        if (testo) testo.textContent = "Spazio locale pieno \u00b7 dati vecchi rimossi";
+    }
+
+    function avvisaStorageLocalePieno() {
+        creaBadgeSync();
+        const dot = document.getElementById("tnt-badge-dot");
+        const testo = document.getElementById("tnt-badge-testo");
+        if (dot) dot.style.background = "#FF9F0A";
+        if (testo) testo.textContent = "Spazio locale pieno";
+    }
+
+    function escapeHtml(testo) {
+        return String(testo == null ? "" : testo)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+    }
 
     function chiaveStorico(r) { return r.doorNumber + "|" + r.unitId + "|" + r.timestampIso; }
     function chiaveSessione(s) { return s.doorNumber + "|" + s.unitId + "|" + s.inizioIso; }
@@ -860,17 +913,35 @@
 
     const VERSIONE_DATI = 1;
 
+    function gmRequest(dettagli) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest !== "function") { reject(new Error("Rete: GM_xmlhttpRequest non disponibile")); return; }
+            GM_xmlhttpRequest(Object.assign({}, dettagli, {
+                timeout: 15000,
+                onload: (res) => resolve(res),
+                onerror: () => reject(new Error("Rete: richiesta fallita")),
+                ontimeout: () => reject(new Error("Rete: timeout")),
+                onabort: () => reject(new Error("Rete: richiesta interrotta"))
+            }));
+        });
+    }
+
     async function githubLeggiFile() {
         const url = "https://api.github.com/repos/" + GITHUB_SYNC.OWNER + "/" + GITHUB_SYNC.REPO + "/contents/" + GITHUB_SYNC.PATH + "?ref=" + GITHUB_SYNC.BRANCH;
-        const res = await fetch(url, { headers: { "Authorization": "Bearer " + GITHUB_SYNC.TOKEN, "Accept": "application/vnd.github+json" } });
-        if (res.status === 404) return { dati: { versione: VERSIONE_DATI, storico: [], sessioni: [], presenze: {} }, sha: null };
-        if (!res.ok) throw new Error("GitHub GET " + res.status);
-        const json = await res.json();
+        const res = await gmRequest({
+            method: "GET",
+            url,
+            headers: { "Authorization": "Bearer " + GITHUB_SYNC.TOKEN, "Accept": "application/vnd.github+json" }
+        });
+        if (res.status === 404) return { dati: { versione: VERSIONE_DATI, storico: [], sessioni: [], presenze: {}, remarksBaie: {} }, sha: null };
+        if (res.status < 200 || res.status >= 300) throw new Error("GitHub GET " + res.status);
+        const json = JSON.parse(res.responseText);
         let dati;
-        try { dati = JSON.parse(base64ParaUtf8(json.content.replace(/\n/g, ""))); } catch (e) { dati = { versione: VERSIONE_DATI, storico: [], sessioni: [], presenze: {} }; }
+        try { dati = JSON.parse(base64ParaUtf8(json.content.replace(/\n/g, ""))); } catch (e) { dati = { versione: VERSIONE_DATI, storico: [], sessioni: [], presenze: {}, remarksBaie: {} }; }
         if (!Array.isArray(dati.storico)) dati.storico = [];
         if (!Array.isArray(dati.sessioni)) dati.sessioni = [];
         if (!dati.presenze || typeof dati.presenze !== "object") dati.presenze = {};
+        if (!dati.remarksBaie || typeof dati.remarksBaie !== "object") dati.remarksBaie = {};
         if (typeof dati.versione !== "number") dati.versione = 0;
         return { dati, sha: json.sha };
     }
@@ -879,13 +950,14 @@
         const url = "https://api.github.com/repos/" + GITHUB_SYNC.OWNER + "/" + GITHUB_SYNC.REPO + "/contents/" + GITHUB_SYNC.PATH;
         const body = { message: "Sync dati turno YOS TOOL", content: utf8ParaBase64(JSON.stringify(dati)), branch: GITHUB_SYNC.BRANCH };
         if (sha) body.sha = sha;
-        const res = await fetch(url, {
+        const res = await gmRequest({
             method: "PUT",
+            url,
             headers: { "Authorization": "Bearer " + GITHUB_SYNC.TOKEN, "Accept": "application/vnd.github+json", "Content-Type": "application/json" },
-            body: JSON.stringify(body)
+            data: JSON.stringify(body)
         });
         if (res.status === 409) return false;
-        if (!res.ok) throw new Error("GitHub PUT " + res.status);
+        if (res.status < 200 || res.status >= 300) throw new Error("GitHub PUT " + res.status);
         return true;
     }
 
@@ -923,12 +995,22 @@
         if (document.getElementById("tnt-badge-sync")) return;
         const badge = document.createElement("div");
         badge.id = "tnt-badge-sync";
-        badge.style.cssText = "position:fixed;top:6px;right:10px;z-index:999998;display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-family:Roboto,sans-serif;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);";
+        badge.style.cssText = "position:fixed;top:6px;left:50%;transform:translateX(-50%);z-index:999998;display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-family:Roboto,sans-serif;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);";
         badge.innerHTML = '<span id="tnt-badge-dot" style="width:8px;height:8px;border-radius:50%;background:#777;flex-shrink:0;"></span><span id="tnt-badge-testo">Sync...</span>';
         document.body.appendChild(badge);
     }
 
-    function aggiornaStatoSync(ok, utentiOggi) {
+    function impostaBadgeInAttesa() {
+        creaBadgeSync();
+        const dot = document.getElementById("tnt-badge-dot");
+        const testo = document.getElementById("tnt-badge-testo");
+        if (dot) dot.style.background = "#777";
+        if (testo) testo.textContent = "Sync...";
+    }
+
+    let ultimoSyncOkOrario = null;
+
+    function aggiornaStatoSync(ok, utentiOggi, motivo) {
         creaBadgeSync();
         const dot = document.getElementById("tnt-badge-dot");
         const testo = document.getElementById("tnt-badge-testo");
@@ -939,11 +1021,14 @@
             return;
         }
         if (ok) {
+            ultimoSyncOkOrario = new Date();
+            const hh = String(ultimoSyncOkOrario.getHours()).padStart(2, "0");
+            const mm = String(ultimoSyncOkOrario.getMinutes()).padStart(2, "0");
             dot.style.background = "#34C759";
-            testo.textContent = "Sync ON \u00b7 " + (utentiOggi != null ? utentiOggi : "?") + " utenti oggi";
+            testo.textContent = "Sync ON \u00b7 " + (utentiOggi != null ? utentiOggi : "?") + " utenti oggi \u00b7 " + hh + ":" + mm;
         } else {
             dot.style.background = "#E24B4A";
-            testo.textContent = "Sync OFF";
+            testo.textContent = "Sync OFF" + (motivo ? " \u00b7 " + motivo : "");
         }
     }
 
@@ -958,6 +1043,21 @@
     }
 
     function attesa(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+    function unisciRemarks(remotoObj) {
+        const limite = Date.now() - SCADENZA_REMARKS_ORE * 60 * 60 * 1000;
+        const combinate = new Map();
+        Object.keys(remotoObj || {}).forEach((k) => {
+            const v = remotoObj[k];
+            if (v && v.testo && v.ts) combinate.set(k, v);
+        });
+        cacheRemarksPerBaia.forEach((v, k) => {
+            const esistente = combinate.get(k);
+            if (!esistente || new Date(v.ts).getTime() >= new Date(esistente.ts).getTime()) combinate.set(k, v);
+        });
+        combinate.forEach((v, k) => { if (new Date(v.ts).getTime() < limite) combinate.delete(k); });
+        return combinate;
+    }
 
     async function sincronizzaDati() {
         if (!GITHUB_SYNC.ATTIVO || !GITHUB_SYNC.TOKEN) { aggiornaStatoSync(false, null); return; }
@@ -977,23 +1077,31 @@
                 const pulito = applicaRetentionCondivisa(storicoUnito, sessioniUnite);
                 presenzeFinali = aggiornaPresenze(remoto.dati.presenze);
 
+                const remarksUnite = unisciRemarks(remoto.dati.remarksBaie);
+                cacheRemarksPerBaia.clear();
+                remarksUnite.forEach((v, k) => cacheRemarksPerBaia.set(k, v));
+                const remarksOggetto = {};
+                remarksUnite.forEach((v, k) => { remarksOggetto[k] = v; });
+
                 salvaStoricoReport(pulito.storico);
                 salvaSessioniScarico(pulito.sessioni);
 
                 const invariato = pulito.storico.length === remoto.dati.storico.length
                     && pulito.sessioni.length === remoto.dati.sessioni.length
                     && remoto.dati.presenze[DEVICE_ID] === presenzeFinali[DEVICE_ID]
-                    && Object.keys(presenzeFinali).length === Object.keys(remoto.dati.presenze).length;
+                    && Object.keys(presenzeFinali).length === Object.keys(remoto.dati.presenze).length
+                    && JSON.stringify(remarksOggetto) === JSON.stringify(remoto.dati.remarksBaie || {});
                 if (invariato) break;
 
-                const ok = await githubScriviFile({ versione: VERSIONE_DATI, storico: pulito.storico, sessioni: pulito.sessioni, presenze: presenzeFinali }, remoto.sha);
+                const ok = await githubScriviFile({ versione: VERSIONE_DATI, storico: pulito.storico, sessioni: pulito.sessioni, presenze: presenzeFinali, remarksBaie: remarksOggetto }, remoto.sha);
                 if (ok) break;
                 await attesa(400 * (tentativo + 1) + Math.random() * 300);
             }
             aggiornaStatoSync(true, contaUtentiOggi(presenzeFinali));
         } catch (e) {
             console.warn("[YOS TOOL] Sincronizzazione fallita:", e.message);
-            aggiornaStatoSync(false, null);
+            const motivo = /\s(401|403)\b/.test(e.message || "") ? "token non valido" : null;
+            aggiornaStatoSync(false, null, motivo);
         } finally {
             sincronizzazioneInCorso = false;
             if (sincronizzazionePendente) { sincronizzazionePendente = false; pianificaSincronizzazione(2000); }
@@ -1438,7 +1546,7 @@
             } else {
                 stat.perCliente.slice(0, 20).forEach((r) => {
                     const colore = r.percentuale >= 30 ? "tnt-card-rosso" : (r.percentuale >= 10 ? "tnt-card-ambra" : "tnt-card-verde");
-                    html += '<div class="tnt-card ' + colore + '"><div class="tnt-card-row"><div class="tnt-card-title">' + r.chiave + '</div><div class="tnt-badge">' + r.percentuale + '%</div></div><div class="tnt-card-sub">' + r.ritardati + ' su ' + r.totale + ' camion in ritardo</div></div>';
+                    html += '<div class="tnt-card ' + colore + '"><div class="tnt-card-row"><div class="tnt-card-title">' + escapeHtml(r.chiave) + '</div><div class="tnt-badge">' + r.percentuale + '%</div></div><div class="tnt-card-sub">' + r.ritardati + ' su ' + r.totale + ' camion in ritardo</div></div>';
                 });
             }
 
@@ -1615,6 +1723,7 @@
         const baie = trovaBaieScaricoOccupate();
         const arriviCorrenti = caricaArriviBaia();
         for (const baia of baie) {
+            if (remarksEsclusiOrologio(cacheRemarksPerBaia.get(baia.doorNumber))) continue;
             const voceBaia = arriviCorrenti[baia.doorNumber];
             if (categoriaBaia(baia.doorNumber) === "Parcheggio" && voceBaia && unitGiaScaricati.has(String(voceBaia.unitId))) continue;
             let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
@@ -1715,7 +1824,7 @@
                 });
             });
             if (presenteAsterisco) {
-                html += '<div class="tnt-footnote">* Cutoff spostato al turno successivo: arrivo troppo vicino al cutoff originale (meno di ' + MARGINE_MINIMO_LAVORAZIONE_MINUTI + ' minuti di lavorazione disponibili)</div>';
+                html += '<div class="tnt-footnote">* Cutoff spostato al turno successivo: arrivo troppo vicino al cutoff originale (meno di 60 minuti per i domestici, 150 per gli internazionali)</div>';
             }
         }
 
@@ -1757,7 +1866,7 @@
                 const classeCard = r.diffMinuti <= 30 ? "tnt-card-rosso" : "tnt-card-ambra";
                 return '<div class="tnt-card ' + classeCard + '">'
                     + '<div class="tnt-card-row">'
-                    + '<span class="tnt-card-title">' + r.door + (r.destinazione ? " · " + r.destinazione : "") + '</span>'
+                    + '<span class="tnt-card-title">' + r.door + (r.destinazione ? " \u00b7 " + escapeHtml(r.destinazione) : "") + '</span>'
                     + '<span class="tnt-badge">' + minutiTesto + '</span>'
                     + '</div>'
                     + '</div>';
@@ -1953,9 +2062,8 @@
         if (doorNumber) baiaSelezionata = doorNumber;
     }, true);
 
-    async function avviaTool() {
-        GITHUB_SYNC.TOKEN = await ottieniTokenAccesso();
-        aggiornaStatoSync(false, null);
+    function avviaTool() {
+        impostaBadgeInAttesa();
 
         try { scanBlocchi(document.body); } catch (e) {}
         try { pulisciStoricoVecchio(); } catch (e) {}
