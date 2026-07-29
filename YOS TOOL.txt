@@ -6,8 +6,8 @@
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        GM_xmlhttpRequest
 // @connect      yostool-default-rtdb.firebaseio.com
-// @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
-// @downloadURL  https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
+// @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL.txt
+// @downloadURL  https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL.txt
 // ==/UserScript==
 
 (function () {
@@ -94,6 +94,20 @@
 
     function remarksEsclusiOrologio(voce) {
         return !!(voce && voce.testo && /buffer|spazzatura/i.test(voce.testo));
+    }
+
+    function baieBufferAttive() {
+        const mappa = new Set();
+        document.querySelectorAll(".reverse_door_number span").forEach((span) => {
+            const doorNumber = span.textContent.trim();
+            if (!doorNumber) return;
+            const doorArea = span.closest('[id^="dockingAreaId_"]');
+            if (!doorArea) return;
+            const suffix = doorArea.id.replace("dockingAreaId_", "");
+            const container = document.getElementById("container_" + suffix);
+            if (container && container.classList.contains("buffer-unit")) mappa.add(doorNumber);
+        });
+        return mappa;
     }
 
     function sembraListaMovimenti(dati) {
@@ -1725,8 +1739,9 @@
 
         const baie = trovaBaieScaricoOccupate();
         const arriviCorrenti = caricaArriviBaia();
+        const baieBuffer = baieBufferAttive();
         for (const baia of baie) {
-            if (remarksEsclusiOrologio(cacheRemarksPerBaia.get(baia.doorNumber))) continue;
+            if (baieBuffer.has(baia.doorNumber) || remarksEsclusiOrologio(cacheRemarksPerBaia.get(baia.doorNumber))) continue;
             const voceBaia = arriviCorrenti[baia.doorNumber];
             if (categoriaBaia(baia.doorNumber) === "Parcheggio" && voceBaia && unitGiaScaricati.has(String(voceBaia.unitId))) continue;
             let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
