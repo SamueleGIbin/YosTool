@@ -1,11 +1,11 @@
 // ==UserScript==
-// @name         YOS TOOL 2.0
+// @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.8
-// @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync GitHub tra postazioni + Esportazione Report Excel completo
+// @version      1.0
+// @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        GM_xmlhttpRequest
-// @connect      api.github.com
+// @connect      yostool-default-rtdb.firebaseio.com
 // @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
 // @downloadURL  https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
 // ==/UserScript==
@@ -13,14 +13,12 @@
 (function () {
     'use strict';
 
-    const GITHUB_SYNC = {
+    const FIREBASE_SYNC = {
         ATTIVO: true,
-        TOKEN: "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",
-        OWNER: "SamueleGibin",
-        REPO: "YosTool",
-        BRANCH: "main",
+        BASE_URL: "https://yostool-default-rtdb.firebaseio.com",
         PATH: "dati/turno-condiviso.json",
-        INTERVALLO_MS: 3 * 60 * 1000
+        SECRET: "9HmZEAQK5NksTxew4EzvoCmuT2HQ0CSBjQULzY0p",
+        INTERVALLO_MS: 15000
     };
 
     const GIORNI_STORICO_TREND = 30;
@@ -926,38 +924,43 @@
         });
     }
 
-    async function githubLeggiFile() {
-        const url = "https://api.github.com/repos/" + GITHUB_SYNC.OWNER + "/" + GITHUB_SYNC.REPO + "/contents/" + GITHUB_SYNC.PATH + "?ref=" + GITHUB_SYNC.BRANCH;
+    function estraiETag(res) {
+        const raw = res && res.responseHeaders ? res.responseHeaders : "";
+        const m = /etag:\s*"?([^"\r\n]+?)"?\s*$/im.exec(raw);
+        return m ? m[1] : null;
+    }
+
+    async function firebaseLeggiFile() {
+        const url = FIREBASE_SYNC.BASE_URL + "/" + FIREBASE_SYNC.PATH + "?auth=" + FIREBASE_SYNC.SECRET;
         const res = await gmRequest({
             method: "GET",
             url,
-            headers: { "Authorization": "Bearer " + GITHUB_SYNC.TOKEN, "Accept": "application/vnd.github+json" }
+            headers: { "X-Firebase-ETag": "true" }
         });
-        if (res.status === 404) return { dati: { versione: VERSIONE_DATI, storico: [], sessioni: [], presenze: {}, remarksBaie: {} }, sha: null };
-        if (res.status < 200 || res.status >= 300) throw new Error("GitHub GET " + res.status);
-        const json = JSON.parse(res.responseText);
-        let dati;
-        try { dati = JSON.parse(base64ParaUtf8(json.content.replace(/\n/g, ""))); } catch (e) { dati = { versione: VERSIONE_DATI, storico: [], sessioni: [], presenze: {}, remarksBaie: {} }; }
+        if (res.status < 200 || res.status >= 300) throw new Error("Firebase GET " + res.status);
+        let dati = null;
+        try { dati = JSON.parse(res.responseText); } catch (e) { dati = null; }
+        if (!dati || typeof dati !== "object") dati = { versione: VERSIONE_DATI, storico: [], sessioni: [], presenze: {}, remarksBaie: {} };
         if (!Array.isArray(dati.storico)) dati.storico = [];
         if (!Array.isArray(dati.sessioni)) dati.sessioni = [];
         if (!dati.presenze || typeof dati.presenze !== "object") dati.presenze = {};
         if (!dati.remarksBaie || typeof dati.remarksBaie !== "object") dati.remarksBaie = {};
         if (typeof dati.versione !== "number") dati.versione = 0;
-        return { dati, sha: json.sha };
+        return { dati, etag: estraiETag(res) };
     }
 
-    async function githubScriviFile(dati, sha) {
-        const url = "https://api.github.com/repos/" + GITHUB_SYNC.OWNER + "/" + GITHUB_SYNC.REPO + "/contents/" + GITHUB_SYNC.PATH;
-        const body = { message: "Sync dati turno YOS TOOL", content: utf8ParaBase64(JSON.stringify(dati)), branch: GITHUB_SYNC.BRANCH };
-        if (sha) body.sha = sha;
+    async function firebaseScriviFile(dati, etag) {
+        const url = FIREBASE_SYNC.BASE_URL + "/" + FIREBASE_SYNC.PATH + "?auth=" + FIREBASE_SYNC.SECRET;
+        const headers = { "Content-Type": "application/json" };
+        if (etag) headers["if-match"] = etag;
         const res = await gmRequest({
             method: "PUT",
             url,
-            headers: { "Authorization": "Bearer " + GITHUB_SYNC.TOKEN, "Accept": "application/vnd.github+json", "Content-Type": "application/json" },
-            data: JSON.stringify(body)
+            headers,
+            data: JSON.stringify(dati)
         });
-        if (res.status === 409) return false;
-        if (res.status < 200 || res.status >= 300) throw new Error("GitHub PUT " + res.status);
+        if (res.status === 412) return false;
+        if (res.status < 200 || res.status >= 300) throw new Error("Firebase PUT " + res.status);
         return true;
     }
 
@@ -1015,7 +1018,7 @@
         const dot = document.getElementById("tnt-badge-dot");
         const testo = document.getElementById("tnt-badge-testo");
         if (!dot || !testo) return;
-        if (!GITHUB_SYNC.ATTIVO || !GITHUB_SYNC.TOKEN) {
+        if (!FIREBASE_SYNC.ATTIVO) {
             dot.style.background = "#777";
             testo.textContent = "Sync OFF";
             return;
@@ -1037,7 +1040,7 @@
     let timerSincronizzazione = null;
 
     function pianificaSincronizzazione(ritardoMs) {
-        if (!GITHUB_SYNC.ATTIVO || !GITHUB_SYNC.TOKEN) return;
+        if (!FIREBASE_SYNC.ATTIVO) return;
         if (timerSincronizzazione) clearTimeout(timerSincronizzazione);
         timerSincronizzazione = setTimeout(sincronizzaDati, ritardoMs || 5000);
     }
@@ -1060,13 +1063,13 @@
     }
 
     async function sincronizzaDati() {
-        if (!GITHUB_SYNC.ATTIVO || !GITHUB_SYNC.TOKEN) { aggiornaStatoSync(false, null); return; }
+        if (!FIREBASE_SYNC.ATTIVO) { aggiornaStatoSync(false, null); return; }
         if (sincronizzazioneInCorso) { sincronizzazionePendente = true; return; }
         sincronizzazioneInCorso = true;
         try {
             let presenzeFinali = {};
             for (let tentativo = 0; tentativo < 6; tentativo++) {
-                const remoto = await githubLeggiFile();
+                const remoto = await firebaseLeggiFile();
                 if (remoto.dati.versione > VERSIONE_DATI) {
                     console.warn("[YOS TOOL] Formato dati remoto piu' recente di questo script: sync sospesa");
                     aggiornaStatoSync(false, null);
@@ -1093,7 +1096,7 @@
                     && JSON.stringify(remarksOggetto) === JSON.stringify(remoto.dati.remarksBaie || {});
                 if (invariato) break;
 
-                const ok = await githubScriviFile({ versione: VERSIONE_DATI, storico: pulito.storico, sessioni: pulito.sessioni, presenze: presenzeFinali, remarksBaie: remarksOggetto }, remoto.sha);
+                const ok = await firebaseScriviFile({ versione: VERSIONE_DATI, storico: pulito.storico, sessioni: pulito.sessioni, presenze: presenzeFinali, remarksBaie: remarksOggetto }, remoto.etag);
                 if (ok) break;
                 await attesa(400 * (tentativo + 1) + Math.random() * 300);
             }
@@ -2108,7 +2111,7 @@
         setInterval(pulisciRegistriSenzaBaia, 10 * 60 * 1000);
         setInterval(elaboraCodaVerificaBaie, 4000);
         pianificaSincronizzazione(3000);
-        setInterval(sincronizzaDati, GITHUB_SYNC.INTERVALLO_MS);
+        setInterval(sincronizzaDati, FIREBASE_SYNC.INTERVALLO_MS);
     }
 
     avviaTool();
