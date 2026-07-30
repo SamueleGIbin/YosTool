@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        GM_xmlhttpRequest
@@ -296,12 +296,16 @@
                 modificato = true;
 
                 if (cambiaUnit) registraInStoricoReport(doorNumber, unitId, orario);
-                if (cambiaUnit && categoriaBaia(doorNumber) === "Scarico") avviaSessioneScarico(doorNumber, unitId, orario);
                 const catPerVerifica = categoriaBaia(doorNumber);
                 if ((catPerVerifica === "Scarico" || catPerVerifica === "Parcheggio") && (cambiaUnit || orarioCambiato)) accodaVerificaBaia(doorNumber, unitId);
             } else if (esistente && esistente.action !== unit.currentAction) {
                 arrivi[doorNumber] = { unitId: unitId, orario: esistente.orario, action: unit.currentAction };
                 modificato = true;
+            }
+            if (categoriaBaia(doorNumber) === "Scarico" && !sessioniScaricoInCorso.has(doorNumber)) {
+                const registrato = arrivi[doorNumber];
+                const orarioInizio = registrato ? registrato.orario : new Date().toISOString();
+                avviaSessioneScarico(doorNumber, unitId, orarioInizio);
             }
         });
         if (modificato) salvaArriviBaia(arrivi);
