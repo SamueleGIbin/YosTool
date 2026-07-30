@@ -6,8 +6,8 @@
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        GM_xmlhttpRequest
 // @connect      yostool-default-rtdb.firebaseio.com
-// @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
-// @downloadURL  https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL%20SCARICO%202.0.txt
+// @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL.txt
+// @downloadURL  https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL.txt
 // ==/UserScript==
 
 (function () {
