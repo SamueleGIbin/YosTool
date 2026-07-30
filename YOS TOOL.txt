@@ -296,7 +296,7 @@
                 modificato = true;
 
                 if (cambiaUnit) registraInStoricoReport(doorNumber, unitId, orario);
-                if (unit.currentAction === "START_UNLOADING") avviaSessioneScarico(doorNumber, unitId, orario);
+                if (cambiaUnit && categoriaBaia(doorNumber) === "Scarico") avviaSessioneScarico(doorNumber, unitId, orario);
                 const catPerVerifica = categoriaBaia(doorNumber);
                 if ((catPerVerifica === "Scarico" || catPerVerifica === "Parcheggio") && (cambiaUnit || orarioCambiato)) accodaVerificaBaia(doorNumber, unitId);
             } else if (esistente && esistente.action !== unit.currentAction) {
