@@ -41,10 +41,36 @@
     }
 
     let ultimoUrlDockingDoors = null;
+    let contaRichiesteTotali = 0;
+    let contaRichiesteDockingDoors = 0;
+    let ultimoTsDockingDoors = null;
+
+    function creaBadgeDebug() {
+        if (document.getElementById("tnt-badge-debug")) return;
+        const badge = document.createElement("div");
+        badge.id = "tnt-badge-debug";
+        badge.style.cssText = "position:fixed;top:34px;left:50%;transform:translateX(-50%);z-index:999998;background:#1c1c1e;border:1px solid #333;border-radius:10px;padding:3px 10px;font-family:Roboto,sans-serif;font-size:10px;color:#aaa;white-space:nowrap;";
+        document.body.appendChild(badge);
+    }
+
+    function aggiornaBadgeDebug() {
+        creaBadgeDebug();
+        const el = document.getElementById("tnt-badge-debug");
+        if (!el) return;
+        const ora = ultimoTsDockingDoors ? new Date(ultimoTsDockingDoors) : null;
+        const oraTxt = ora ? String(ora.getHours()).padStart(2, "0") + ":" + String(ora.getMinutes()).padStart(2, "0") + ":" + String(ora.getSeconds()).padStart(2, "0") : "mai";
+        el.textContent = "req:" + contaRichiesteTotali + " dockingDoors:" + contaRichiesteDockingDoors + " ultima:" + oraTxt + " sessioniAperte:" + sessioniScaricoInCorso.size;
+    }
 
     function gestisciRispostaIntercettata(url, testoBody) {
         const urlStr = String(url || "");
         logDebugEndpoint(urlStr, testoBody);
+        contaRichiesteTotali++;
+        if (urlStr.indexOf("dockingDoors") !== -1) {
+            contaRichiesteDockingDoors++;
+            ultimoTsDockingDoors = Date.now();
+        }
+        aggiornaBadgeDebug();
         try {
             if (urlStr.indexOf("dockingDoors") !== -1) {
                 ultimoUrlDockingDoors = urlStr;
@@ -2117,6 +2143,8 @@
         });
         observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class"] });
 
+        try { creaBadgeDebug(); aggiornaBadgeDebug(); } catch (e) {}
+        setInterval(aggiornaBadgeDebug, 2000);
         setInterval(aggiornaPannelloOutbound, 15000);
         setInterval(aggiornaPannelloScaricoSeAperto, 15000);
         setInterval(pollDockingDoorsAttivo, 8000);
