@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo
+// @version      1.5
+// @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        GM_xmlhttpRequest
 // @connect      yostool-default-rtdb.firebaseio.com
@@ -26,6 +26,39 @@
 
     const GIORNI_STORICO_TREND = 30;
     const GIORNI_MEDIA_TREND = 7;
+
+    const DATI_TEMPISTICA_PARCEL = [
+        { turno: "PRIMO SHIFT SCARICO", gruppi: [
+            { categoria: "IMPORT DI PRIMA", arrivo: "20:00", scadenza: "21:30", codici: "DNG-XWT-WA1-QAR-MAD-BZQ-MV9" },
+            { categoria: "CLIENTI DOM", arrivo: "21:00", scadenza: "21:45", codici: "AOS1-SATCI-AT21-RUBIX-ESSENZ-GAMESTOP-CEMBR-PJLO-COWA-HILTI-APLE-PENT-LIVA-UFAL-INCO-RUNNER" },
+            { categoria: "FILIALI PER SUD", arrivo: "21:00", scadenza: "21:45", codici: "ISV-IOE" },
+            { categoria: "CLIENTI INT", arrivo: "22:30", scadenza: "1:00", codici: "LIVA-GEWISS-MASE" },
+            { categoria: "IMPORT PRIMA DOWNGRADATO", arrivo: "21:30", scadenza: "23:45", codici: "HNJ-DNG-DFT-BCN(ALICANTE)" },
+            { categoria: "FILIALI PER NORD MIX ITALIA", arrivo: "22:30", scadenza: "23:45", codici: "CUF-OS3-IBU-IPO-ICM-RNV-ILJ-QVA-QAL-BEA-BRG-MZ1-GOA-IIM-Q5M-B8Y-M1S-TO1-ZD1-ECL-LUG" },
+            { categoria: "FILIALI PER EXPORT", arrivo: "00:00", scadenza: "1:00", codici: "VBS-MM1-IBD-VE1-REM-BO1-QPA-VRN-TO1-MDA-PMF-OSO-B7Q" }
+        ]},
+        { turno: "SECONDO SHIFT SCARICO", gruppi: [
+            { categoria: "FILIALI DIVISIONE PER 07", arrivo: "00:00", scadenza: "04:00", codici: "BRG-IPO-MZ1-IBU-MM1-TO1-VRN-VNZ" },
+            { categoria: "IMPORT SECONDA", arrivo: "02:30", scadenza: "04:00", codici: "MV9-BCN-XWT-SKG-ATH" },
+            { categoria: "HUB 07 NORD", arrivo: "04:30", scadenza: "05:30", codici: "BO2-PD2-FC5" },
+            { categoria: "HUB EXPORT/SUD", arrivo: "08:15", scadenza: "08:50", codici: "" },
+            { categoria: "IMPORT ANTICIPI E FILIALI ANTICIPI", arrivo: "08:15", scadenza: "08:50", codici: "LYS-MRS-BA5-NT3" }
+        ]}
+    ];
+
+    const TABELLA_DEST_PARCEL = [
+        ["AN6","ANCONA"],["ATH","ATENE"],["B7Q","BOLOGNA"],["B8Y","BERGAMO"],["BA5","BARI"],["BCN","BARCELLONA"],
+        ["BEA","BIELLA"],["BO1","BOLOGNA"],["BO2","BOLOGNA"],["BRG","BERGAMO"],["BZQ","BELGIO"],["CUF","CUNEO"],
+        ["DFT*","GERMANIA"],["DNG*","NORIMBERGA"],["ECL","FRANCIA"],["FC5","FIRENZE"],["FIA","FIANO"],["GOA","GENOVA"],
+        ["HNJ","HANNOVER"],["IBD","BASSANO-DEL-G"],["IBU","BUSTO-A"],["ICM","COMO"],["IIM","IBERIA"],["ILJ","LECCO"],
+        ["IOE","OMEGNA"],["IPO","PERO"],["ISV","SAVONA"],["LJU","SLOVENIA"],["LUG","SVIZZERA"],["LYS","FRANCIA"],
+        ["MAD","MADRID"],["MDA","MODENA"],["MIL","PESCHIERA"],["MILA","MILANO NEW"],["MM1","MILANO-MEGA"],["MRS","MARSIGLIA"],
+        ["MV9","FRANCIA"],["MXP","MALPENSA"],["MZ1","MONZA"],["NC3","NAPOLI-C"],["NT3","NAPOLI-T"],["OS3","ORBASSANO"],
+        ["OSO","SONDRIO"],["PD2","PADOVA"],["PMF","PARMA"],["PRG","PRAGA"],["PSA","PISA"],["PSR","BENTIVOGLIO"],
+        ["QAL","ALESSANDRIA"],["QAR","OLANDA"],["QPA","PADOVA"],["QVA","VARESE"],["REM","REGGIO"],["RNV","NOVARA"],
+        ["SKG","GRECIA"],["TO1","TORINO"],["TV1","TREVISO"],["VBS","BRESCIA"],["VCE","VENEZIA"],["VE1","VENEZIA"],
+        ["VNZ","VICENZA"],["VRN","VERONA"],["WA1","VARSAVIA"],["XWT","VIENNA"],["ZD1","ZIBIDO"],["ZRH","SVIZZERA"]
+    ];
 
     let ultimoUrlDockingDoors = null;
 
@@ -307,6 +340,7 @@
         for (const numEl of nodi) {
             const span = numEl.querySelector("span");
             if (!span || span.textContent.trim() !== doorNumber) continue;
+            if (numEl.offsetParent === null) continue;
             const wrapper = numEl.closest('[id^="unit_"]');
             if (wrapper) return wrapper;
         }
@@ -343,6 +377,8 @@
             const wrapper = trovaElementoBaiaPerNumero(voce.doorNumber);
             if (!wrapper) { codaVerificaBaie.push(voce); codaInLavorazione = false; return; }
             const baiaPrecedente = baiaSelezionata;
+            const tabOutboundPrecedente = [...document.querySelectorAll(".door-info__header--nav-text")]
+                .some((el) => el.textContent.trim() === "OUTBOUND" && el.classList.contains("door-info__header--nav-text--selected"));
             simulaClickReale(wrapper);
             await new Promise((r) => setTimeout(r, 900));
             assicuraTabInbound();
@@ -366,7 +402,14 @@
             }
             if (baiaPrecedente && baiaPrecedente !== voce.doorNumber) {
                 const wrapperPrecedente = trovaElementoBaiaPerNumero(baiaPrecedente);
-                if (wrapperPrecedente) simulaClickReale(wrapperPrecedente);
+                if (wrapperPrecedente) {
+                    simulaClickReale(wrapperPrecedente);
+                    if (tabOutboundPrecedente) {
+                        await new Promise((r) => setTimeout(r, 400));
+                        const navOutbound = [...document.querySelectorAll(".door-info__header--nav-text")].find((el) => el.textContent.trim() === "OUTBOUND");
+                        if (navOutbound && !navOutbound.classList.contains("door-info__header--nav-text--selected")) navOutbound.click();
+                    }
+                }
             }
         } catch (e) {}
         codaInLavorazione = false;
@@ -407,8 +450,6 @@
         { nome: "Hub Export/Sud", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["AN6", "FIA", "NC3", "NT3", "GDEC", "COFR", "UFAL", "APLE"] },
         { nome: "Import Anticipi", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["LYS", "MRS", "NT3", "BA5"] }
     ];
-    const SOGLIA_OUTBOUND_MINUTI = 60;
-    const SOGLIA_SCARICO_MINUTI = 500;
     const MARGINE_MINIMO_DOMESTICO_MINUTI = 60;
     const MARGINE_MINIMO_INTERNAZIONALE_MINUTI = 150;
     const ORARIO_CHIUSURA_SABATO_MINUTI = 2 * 60;
@@ -500,7 +541,7 @@
             risultato = choices[0];
         }
 
-        if (arrivoPortaReale && !isNaN(arrivoPortaReale.getTime())) {
+        if (arrivoPortaReale && !isNaN(arrivoPortaReale.getTime()) && arrivoPortaReale.getTime() > arrivo.getTime()) {
             const margineReale = (risultato.cutoffDate.getTime() - arrivoPortaReale.getTime()) / 60000;
             if (margineReale < margineMinimo) {
                 const nuovoCutoff = trovaProssimoCutoffConMargine(risultato.cutoffDate, arrivoPortaReale, margineMinimo);
@@ -553,7 +594,13 @@
         ".tnt-riga-data-ora input[type=time]{flex:1 1 40%;}",
         ".tnt-panel-body button{width:100%;padding:9px;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;margin-bottom:8px;border:none;}",
         ".tnt-btn-primary{background:#FF7A00;color:#1c1c1e;}",
-        ".tnt-btn-secondary{background:#2c2c2e;color:#f2f2f2;border:1px solid #444 !important;}"
+        ".tnt-btn-secondary{background:#2c2c2e;color:#f2f2f2;border:1px solid #444 !important;}",
+        ".cc-menu-divider{height:1px;background:#3a3a3c;margin:14px 10px 0;}",
+        ".cc-menu-section-label{font-family:Roboto,sans-serif;font-size:9px;font-weight:700;letter-spacing:0.7px;text-transform:uppercase;text-align:center;margin:8px 4px 0;}",
+        ".tnt-panel-body input[type=text]{width:100%;margin-bottom:10px;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;box-sizing:border-box;font-family:Roboto,sans-serif;font-size:13px;}",
+        ".tnt-dest-row{display:flex;align-items:center;justify-content:space-between;background:#2e2e31;border-radius:6px;padding:6px 10px;margin-bottom:4px;font-family:Roboto,sans-serif;}",
+        ".tnt-dest-codice{color:#8B5CF6;font-weight:700;font-size:12px;}",
+        ".tnt-dest-nome{color:#d5d5da;font-size:12px;}"
     ].join("");
     document.head.appendChild(stileBlink);
 
@@ -612,7 +659,13 @@
         const m = testo.trim().match(/(\d{2})[\/\-](\d{2})\s+(\d{2}):(\d{2})/);
         if (!m) return null;
         const giorno = parseInt(m[1], 10), mese = parseInt(m[2], 10), ore = parseInt(m[3], 10), min = parseInt(m[4], 10);
-        return new Date(new Date().getFullYear(), mese - 1, giorno, ore, min);
+        const ora = new Date();
+        const annoCorrente = ora.getFullYear();
+        let candidato = new Date(annoCorrente, mese - 1, giorno, ore, min);
+        const diffGiorni = (candidato.getTime() - ora.getTime()) / 86400000;
+        if (diffGiorni > 180) candidato = new Date(annoCorrente - 1, mese - 1, giorno, ore, min);
+        else if (diffGiorni < -180) candidato = new Date(annoCorrente + 1, mese - 1, giorno, ore, min);
+        return candidato;
     }
 
     function creaColTurno(chiaveTesto, valoreTesto, colClass = "col-4") {
@@ -728,7 +781,7 @@
                     avvisoCodice.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Codice origine non riconosciuto: <strong>' + escapeHtml(codiceOrigine) + '</strong> \u2014 nessun cutoff calcolabile, va censito</div></div>';
                     sezione.appendChild(avvisoCodice);
                 }
-                if (risultato && risultato.ritardo && risultato.cutoffOriginale) {
+                if (risultato && risultato.ritardo && risultato.cutoffOriginale && categoriaBaia(baiaSelezionata) === "Scarico") {
                     const hhO = String(risultato.cutoffOriginale.getHours()).padStart(2, "0");
                     const mmO = String(risultato.cutoffOriginale.getMinutes()).padStart(2, "0");
                     const hhN = String(risultato.cutoffDate.getHours()).padStart(2, "0");
@@ -744,6 +797,14 @@
 
     const COLORI_UNIT_PRONTA = ["rgb(135,185,172)"];
 
+    function coloreIndicaPronta(colore) {
+        if (COLORI_UNIT_PRONTA.indexOf(colore) !== -1) return true;
+        const m = colore.match(/rgba?\((\d+),(\d+),(\d+)/);
+        if (!m) return false;
+        const r = parseInt(m[1], 10), g = parseInt(m[2], 10), b = parseInt(m[3], 10);
+        return b > r + 15 && b > g + 10;
+    }
+
     function rigaSegnalataPronta(riga) {
         if (riga.querySelector(".unit_ready_outline") || riga.classList.contains("unit_ready_outline")) return true;
         const dockingBg = riga.querySelector('[id^="dockingBg_"]');
@@ -755,13 +816,14 @@
         }
         colore = colore.replace(/\s+/g, "");
         if (!colore) return false;
-        return COLORI_UNIT_PRONTA.some((c) => colore.indexOf(c) !== -1);
+        return coloreIndicaPronta(colore);
     }
 
     function leggiOutboundInScadenza() {
         const righe = document.querySelectorAll(".scheduled-root.outbound-task, .scheduled-root.highlight-task, .scheduled-root.highlight-undeparted-unit");
         const risultati = [];
         const ora = new Date();
+        const finestra = finestraTurnoCorrente(ora);
         righe.forEach((riga) => {
             const doorEl = riga.querySelector(".outbound-door-number span");
             const dataEl = riga.querySelector(".outbound-dates-position-change");
@@ -776,10 +838,9 @@
             const giorno = parseInt(match[1], 10), mese = parseInt(match[2], 10), ore = parseInt(match[3], 10), minuti = parseInt(match[4], 10);
             const partenza = new Date(ora.getFullYear(), mese - 1, giorno, ore, minuti);
             const pronto = new Date(partenza.getTime() - 20 * 60000);
+            if (pronto.getTime() < finestra.inizio.getTime() || pronto.getTime() > finestra.fine.getTime()) return;
             const diffMinuti = (pronto.getTime() - ora.getTime()) / 60000;
-            if (diffMinuti <= SOGLIA_OUTBOUND_MINUTI && diffMinuti > -60) {
-                risultati.push({ door, destinazione: destEl ? destEl.textContent.trim() : "", diffMinuti, categoria: categoriaBaia(door) });
-            }
+            risultati.push({ door, destinazione: destEl ? destEl.textContent.trim() : "", diffMinuti, categoria: categoriaBaia(door) });
         });
         risultati.sort((a, b) => a.diffMinuti - b.diffMinuti);
         const visti = new Set();
@@ -803,6 +864,36 @@
             risultati.push({ doorNumber });
         });
         return risultati;
+    }
+
+    const COLORE_BAIA_PARZIALE = "rgb(255,217,127)";
+    function trovaBaieFreightParziali() {
+        const risultati = new Set();
+        function estraiDoorNumber(wrapper) {
+            const numEl = wrapper.querySelector(DOOR_NUM_SELECTOR_SCARICO + " span");
+            return numEl ? numEl.textContent.trim() : null;
+        }
+        document.querySelectorAll('[id^="container_"].partiallyloaded_outline').forEach((el) => {
+            const wrapper = el.closest('[id^="unit_"]');
+            if (!wrapper) return;
+            const doorNumber = estraiDoorNumber(wrapper);
+            if (!doorNumber || categoriaBaia(doorNumber) !== "Freight") return;
+            risultati.add(doorNumber);
+        });
+        document.querySelectorAll('[id^="dockingBg_"]').forEach((bg) => {
+            let colore = bg.style && bg.style.backgroundColor ? bg.style.backgroundColor : "";
+            if (!colore && window.getComputedStyle) {
+                try { colore = window.getComputedStyle(bg).backgroundColor || ""; } catch (e) {}
+            }
+            colore = colore.replace(/\s+/g, "");
+            if (colore !== COLORE_BAIA_PARZIALE) return;
+            const wrapper = bg.closest('[id^="unit_"]');
+            if (!wrapper) return;
+            const doorNumber = estraiDoorNumber(wrapper);
+            if (!doorNumber || categoriaBaia(doorNumber) !== "Freight") return;
+            risultati.add(doorNumber);
+        });
+        return [...risultati].sort(confrontaBaie);
     }
 
     const STORAGE_KEY_ARRIVI = "tnt_arrivi_baia_scarico_v1";
@@ -913,8 +1004,14 @@
             .replace(/'/g, "&#39;");
     }
 
-    function chiaveStorico(r) { return r.doorNumber + "|" + r.unitId + "|" + r.timestampIso; }
-    function chiaveSessione(s) { return s.doorNumber + "|" + s.unitId + "|" + s.inizioIso; }
+    function chiaveStorico(r) {
+        const t = r.timestampIso ? new Date(r.timestampIso).getTime() : 0;
+        return r.doorNumber + "|" + r.unitId + "|" + Math.round(t / 60000);
+    }
+    function chiaveSessione(s) {
+        const t = s.inizioIso ? new Date(s.inizioIso).getTime() : 0;
+        return s.doorNumber + "|" + s.unitId + "|" + Math.round(t / 60000);
+    }
 
     function unisciSenzaDuplicati(listaA, listaB, chiaveFn) {
         const mappa = new Map();
@@ -1207,10 +1304,13 @@
         }
     }
 
+    const FINESTRA_DEDUP_STORICO_MS = 5 * 60 * 1000;
     function registraInStoricoReport(doorNumber, unitId, orarioIso) {
         pulisciStoricoVecchio();
         const storico = caricaStoricoReport();
-        const esisteGia = storico.some(item => item.doorNumber === doorNumber && item.unitId === unitId);
+        const nuovoT = new Date(orarioIso).getTime();
+        const esisteGia = storico.some(item => item.doorNumber === doorNumber && item.unitId === unitId
+            && !isNaN(nuovoT) && Math.abs(new Date(item.timestampIso).getTime() - nuovoT) < FINESTRA_DEDUP_STORICO_MS);
         if (esisteGia) return;
 
         const dataArrivo = new Date(orarioIso);
@@ -1668,6 +1768,41 @@
         esegui(oggi, "00:00", oggi, "23:59");
     }
 
+    function renderPannelloTempisticaParcel(panelBody) {
+        let html = '<input type="text" id="tnt-parcel-ricerca" placeholder="Cerca codice o filiale...">';
+        DATI_TEMPISTICA_PARCEL.forEach((turno) => {
+            html += '<div class="tnt-group-label">' + turno.turno + '</div>';
+            turno.gruppi.forEach((g) => {
+                html += '<div class="tnt-card tnt-parcel-riga" data-ricerca="' + escapeHtml((g.categoria + ' ' + g.codici).toLowerCase()) + '">'
+                    + '<div class="tnt-card-row">'
+                    + '<span class="tnt-card-title">' + escapeHtml(g.categoria) + '</span>'
+                    + '<span class="tnt-badge" style="background:#3b2c66;color:#D9C6FF;">Arrivo ' + g.arrivo + '</span>'
+                    + '</div>'
+                    + '<div class="tnt-card-sub">Scarico entro le ' + g.scadenza + (g.codici ? ' &middot; ' + escapeHtml(g.codici) : '') + '</div>'
+                    + '</div>';
+            });
+        });
+        html += '<div class="tnt-group-label">Tabella DEST &rarr; localit&agrave;</div>';
+        html += '<div id="tnt-parcel-dest-lista">';
+        TABELLA_DEST_PARCEL.forEach((d) => {
+            html += '<div class="tnt-dest-row tnt-parcel-riga" data-ricerca="' + escapeHtml((d[0] + ' ' + d[1]).toLowerCase()) + '">'
+                + '<span class="tnt-dest-codice">' + escapeHtml(d[0]) + '</span>'
+                + '<span class="tnt-dest-nome">' + escapeHtml(d[1]) + '</span>'
+                + '</div>';
+        });
+        html += '</div>';
+        panelBody.innerHTML = html;
+
+        const campoRicerca = document.getElementById("tnt-parcel-ricerca");
+        campoRicerca.addEventListener("click", (e) => e.stopPropagation());
+        campoRicerca.addEventListener("input", () => {
+            const filtro = campoRicerca.value.trim().toLowerCase();
+            panelBody.querySelectorAll(".tnt-parcel-riga").forEach((el) => {
+                el.style.display = (!filtro || el.getAttribute("data-ricerca").indexOf(filtro) !== -1) ? "" : "none";
+            });
+        });
+    }
+
     function renderPannelloReport(panelBody) {
         const oggi = new Date().toISOString().slice(0, 10);
         panelBody.innerHTML =
@@ -1762,6 +1897,17 @@
         return false;
     }
 
+    function finestraTurnoCorrente(riferimento) {
+        const ora = riferimento || new Date();
+        const minutiOra = ora.getHours() * 60 + ora.getMinutes();
+        const y = ora.getFullYear(), mo = ora.getMonth(), d = ora.getDate();
+        function dataOra(offsetGiorni, h, m) { return new Date(y, mo, d + offsetGiorni, h, m, 0, 0); }
+        if (minutiOra >= 21 * 60 + 30) return { inizio: dataOra(0, 21, 30), fine: dataOra(1, 1, 0), nome: "Pomeriggio" };
+        if (minutiOra < 60) return { inizio: dataOra(-1, 21, 30), fine: dataOra(0, 1, 0), nome: "Pomeriggio" };
+        if (minutiOra < 9 * 60) return { inizio: dataOra(0, 1, 0), fine: dataOra(0, 9, 0), nome: "Notte" };
+        return { inizio: dataOra(0, 21, 30), fine: dataOra(1, 1, 0), nome: "Pomeriggio" };
+    }
+
     function leggiCutoffBaiaCorrente() {
         const originClassEl = document.querySelector(".inbound-origin-en-route, .inbound-origin");
         let codiceOrigine = null;
@@ -1803,9 +1949,9 @@
     function scansionaBaieScarico(panelBody) {
         const gruppi = new Map();
         const ora = new Date();
+        const finestra = finestraTurnoCorrente(ora);
         function aggiungiAlGruppo(risultato, infoBaia) {
-            const diffMinuti = (risultato.cutoffDate.getTime() - ora.getTime()) / 60000;
-            if (diffMinuti > SOGLIA_SCARICO_MINUTI) return;
+            if (risultato.cutoffDate.getTime() < finestra.inizio.getTime() || risultato.cutoffDate.getTime() > finestra.fine.getTime()) return;
             const senzaBaiaAssegnata = /^\(.*\)$/.test(infoBaia);
             if (senzaBaiaAssegnata) return;
             const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
@@ -1836,7 +1982,7 @@
             aggiungiAlGruppo(infoCutoff.cutoff, baia.doorNumber);
         }
 
-        renderPannelloScaricoConteggi(panelBody, gruppi);
+        renderPannelloScaricoConteggi(panelBody, gruppi, finestra);
     }
 
     function elencoBaieScaricoComplete() {
@@ -1878,18 +2024,23 @@
         return a.localeCompare(b);
     }
 
-    function renderPannelloScaricoConteggi(panelBody, gruppi) {
+    function renderPannelloScaricoConteggi(panelBody, gruppi, finestra) {
         let html = "";
+        if (finestra) {
+            const hhI = String(finestra.inizio.getHours()).padStart(2, "0");
+            const mmI = String(finestra.inizio.getMinutes()).padStart(2, "0");
+            const hhF = String(finestra.fine.getHours()).padStart(2, "0");
+            const mmF = String(finestra.fine.getMinutes()).padStart(2, "0");
+            html += '<div class="tnt-group-label">Turno ' + finestra.nome + ' (' + hhI + ':' + mmI + ' - ' + hhF + ':' + mmF + ')</div>';
+        }
         if (gruppi.size === 0) {
-            html += '<div class="tnt-empty">Nessuno scarico in scadenza</div>';
+            html += '<div class="tnt-empty">Nessun cutoff nel turno in corso</div>';
         } else {
             const ora = new Date();
             const voci = [...gruppi.entries()].sort((a, b) => a[1].orario.getTime() - b[1].orario.getTime());
             const fasce = [
-                { chiave: "ritardo", etichetta: "Cutoff scaduto", classe: "tnt-card-rosso", test: (m) => m < 0 },
-                { chiave: "30", etichetta: "Cutoff entro 30 minuti", classe: "tnt-card-rosso", test: (m) => m <= 30 },
-                { chiave: "60", etichetta: "Cutoff entro 60 minuti", classe: "tnt-card-ambra", test: (m) => m <= 60 },
-                { chiave: "oltre", etichetta: "Prossimi cutoff", classe: "tnt-card-ambra", test: () => true }
+                { chiave: "ritardo", etichetta: "Cutoff scaduti", classe: "tnt-card-rosso", test: (m) => m < 0 },
+                { chiave: "turno", etichetta: "Cutoff del turno in corso", classe: "tnt-card-ambra", test: () => true }
             ];
             const bucket = new Map();
             voci.forEach(([chiave, info]) => {
@@ -1923,6 +2074,12 @@
                 html += '<div class="tnt-footnote">* Cutoff spostato al turno successivo: arrivo troppo vicino al cutoff originale (meno di 60 minuti per i domestici, 150 per gli internazionali)</div>';
             }
         }
+
+        const freightParziali = trovaBaieFreightParziali();
+        html += '<div class="tnt-group-label">Parziali Freight (' + freightParziali.length + ')</div>';
+        html += '<div class="tnt-card tnt-card-ambra"><div class="tnt-card-sub">'
+            + (freightParziali.length > 0 ? freightParziali.join(", ") : "Nessun parziale Freight")
+            + '</div></div>';
 
         const arriviAttuali = caricaArriviBaia();
         const baieLibere = elencoBaieScaricoComplete().filter((n) => {
@@ -1978,14 +2135,26 @@
         scansionaBaieScarico(body);
     }
 
-    function creaIconaMenu(id, coloreCerchio, disegnoSvg) {
-        const iconaSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 46" width="46" height="46"><rect x="0" y="0" width="46" height="46" rx="10" fill="#47484a"/>' + disegnoSvg + '</svg>';
+    function creaIconaMenu(id, coloreSfondo, disegnoSvg) {
+        const iconaSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 46" width="46" height="46"><rect x="0" y="0" width="46" height="46" rx="10" fill="' + coloreSfondo + '"/>' + disegnoSvg + '</svg>';
         const btn = document.createElement("img");
         btn.id = id;
         btn.className = "cc-menu-button";
         btn.src = "data:image/svg+xml;base64," + btoa(iconaSvg);
         btn.style.cssText = "display:block;width:46px;height:46px;margin:16px 13px 0;cursor:pointer;user-select:none;";
         return btn;
+    }
+
+    function creaEtichettaSezioneMenu(id, testo, colore) {
+        const divider = document.createElement("div");
+        divider.id = id + "-divider";
+        divider.className = "cc-menu-divider";
+        const label = document.createElement("div");
+        label.id = id;
+        label.className = "cc-menu-section-label";
+        label.style.color = colore;
+        label.textContent = testo;
+        return { divider: divider, label: label };
     }
 
     function creaPannello(id, titolo, coloreIcona) {
@@ -2072,50 +2241,76 @@
         panel.addEventListener("click", (e) => e.stopPropagation());
     }
 
+    const COLORE_SEZIONE_SCARICO = "#8B5CF6";
+    const COLORE_SEZIONE_CARICO = "#FF7A00";
+
     function initIcone() {
         const menu = document.querySelector(".cc-hub-menu-panel");
         if (!menu) return;
 
-        let panelOrologio = document.getElementById("tnt-orologio-panel");
-        if (!document.getElementById("tnt-orologio-btn")) {
-            const disegnoOrologio = '<circle cx="23" cy="23" r="13" fill="none" stroke="#ffffff" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>';
-            const btn = creaIconaMenu("tnt-orologio-btn", "#ffffff", disegnoOrologio);
-            btn.title = "Unit Ready in scadenza (Outbound)";
-            menu.appendChild(btn);
-            panelOrologio = creaPannello("tnt-orologio-panel", "Carico - unit ready in scadenza", "#ffffff");
-            collegaClick(btn, panelOrologio, aggiornaPannelloOutbound, ORDINE_GRUPPO_CARICO_SCARICO);
+        if (!document.getElementById("cc-menu-label-scarico")) {
+            const sezScarico = creaEtichettaSezioneMenu("cc-menu-label-scarico", "Scarico", COLORE_SEZIONE_SCARICO);
+            menu.appendChild(sezScarico.divider);
+            menu.appendChild(sezScarico.label);
         }
 
         if (!document.getElementById("tnt-orologio-scarico-btn")) {
-            const disegnoScarico = '<circle cx="23" cy="23" r="13" fill="none" stroke="#ffcc00" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="#ffcc00" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="#ffcc00" stroke-width="2" stroke-linecap="round"/>';
-            const btn2 = creaIconaMenu("tnt-orologio-scarico-btn", "#ffcc00", disegnoScarico);
+            const disegnoScarico = '<circle cx="23" cy="23" r="13" fill="none" stroke="' + COLORE_SEZIONE_SCARICO + '" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="' + COLORE_SEZIONE_SCARICO + '" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="' + COLORE_SEZIONE_SCARICO + '" stroke-width="2" stroke-linecap="round"/>';
+            const btn2 = creaIconaMenu("tnt-orologio-scarico-btn", "#ffffff", disegnoScarico);
             btn2.title = "Carichi in scadenza cutoff (Scarico)";
             menu.appendChild(btn2);
-            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", "#ffcc00");
+            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", COLORE_SEZIONE_SCARICO);
             const body2 = document.getElementById("tnt-orologio-scarico-panel-body");
             collegaClick(btn2, panel2, () => scansionaBaieScarico(body2), ORDINE_GRUPPO_CARICO_SCARICO);
         }
 
         if (!document.getElementById("tnt-btn-scarica-report")) {
-            const disegnoReport = '<rect x="15" y="13" width="16" height="20" rx="2" fill="none" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="18" x2="27" y2="18" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="23" x2="27" y2="23" stroke="#FF7A00" stroke-width="2"/><line x1="19" y1="28" x2="24" y2="28" stroke="#FF7A00" stroke-width="2"/>';
-            const btnReport = creaIconaMenu("tnt-btn-scarica-report", "#FF7A00", disegnoReport);
+            const disegnoReport = '<rect x="15" y="13" width="16" height="20" rx="2" fill="none" stroke="' + COLORE_SEZIONE_SCARICO + '" stroke-width="2"/><line x1="19" y1="18" x2="27" y2="18" stroke="' + COLORE_SEZIONE_SCARICO + '" stroke-width="2"/><line x1="19" y1="23" x2="27" y2="23" stroke="' + COLORE_SEZIONE_SCARICO + '" stroke-width="2"/><line x1="19" y1="28" x2="24" y2="28" stroke="' + COLORE_SEZIONE_SCARICO + '" stroke-width="2"/>';
+            const btnReport = creaIconaMenu("tnt-btn-scarica-report", "#ffffff", disegnoReport);
             btnReport.title = "Scarica Report Turno CSV";
 
-            const panelReport = creaPannello("tnt-report-panel", "Esporta report turno", "#FF7A00");
+            const panelReport = creaPannello("tnt-report-panel", "Esporta report turno", COLORE_SEZIONE_SCARICO);
             const bodyReport = document.getElementById("tnt-report-panel-body");
             collegaClick(btnReport, panelReport, () => renderPannelloReport(bodyReport));
             menu.appendChild(btnReport);
         }
 
         if (!document.getElementById("tnt-btn-statistiche")) {
-            const disegnoStat = '<rect x="16" y="26" width="4" height="7" fill="#6EC1E4"/><rect x="22" y="20" width="4" height="13" fill="#6EC1E4"/><rect x="28" y="15" width="4" height="18" fill="#6EC1E4"/>';
-            const btnStat = creaIconaMenu("tnt-btn-statistiche", "#6EC1E4", disegnoStat);
+            const disegnoStat = '<rect x="16" y="26" width="4" height="7" fill="' + COLORE_SEZIONE_SCARICO + '"/><rect x="22" y="20" width="4" height="13" fill="' + COLORE_SEZIONE_SCARICO + '"/><rect x="28" y="15" width="4" height="18" fill="' + COLORE_SEZIONE_SCARICO + '"/>';
+            const btnStat = creaIconaMenu("tnt-btn-statistiche", "#ffffff", disegnoStat);
             btnStat.title = "Statistiche di turno";
 
-            const panelStat = creaPannello("tnt-statistiche-panel", "Statistiche di turno", "#6EC1E4");
+            const panelStat = creaPannello("tnt-statistiche-panel", "Statistiche di turno", COLORE_SEZIONE_SCARICO);
             const bodyStat = document.getElementById("tnt-statistiche-panel-body");
             collegaClick(btnStat, panelStat, () => renderPannelloStatistiche(bodyStat));
             menu.appendChild(btnStat);
+        }
+
+        if (!document.getElementById("tnt-btn-parcel-tempistica")) {
+            const disegnoParcel = '<rect x="14" y="14" width="8" height="8" rx="1.5" fill="none" stroke="' + COLORE_SEZIONE_SCARICO + '" stroke-width="2"/><rect x="24" y="14" width="8" height="8" rx="1.5" fill="none" stroke="' + COLORE_SEZIONE_SCARICO + '" stroke-width="2"/><rect x="14" y="24" width="8" height="8" rx="1.5" fill="none" stroke="' + COLORE_SEZIONE_SCARICO + '" stroke-width="2"/><rect x="24" y="24" width="8" height="8" rx="1.5" fill="none" stroke="' + COLORE_SEZIONE_SCARICO + '" stroke-width="2"/>';
+            const btnParcel = creaIconaMenu("tnt-btn-parcel-tempistica", "#ffffff", disegnoParcel);
+            btnParcel.title = "Tempistica Parcel Scarico";
+
+            const panelParcel = creaPannello("tnt-parcel-panel", "Scarico - Tempistica Parcel", COLORE_SEZIONE_SCARICO);
+            const bodyParcel = document.getElementById("tnt-parcel-panel-body");
+            collegaClick(btnParcel, panelParcel, () => renderPannelloTempisticaParcel(bodyParcel));
+            menu.appendChild(btnParcel);
+        }
+
+        if (!document.getElementById("cc-menu-label-carico")) {
+            const sezCarico = creaEtichettaSezioneMenu("cc-menu-label-carico", "Carico", COLORE_SEZIONE_CARICO);
+            menu.appendChild(sezCarico.divider);
+            menu.appendChild(sezCarico.label);
+        }
+
+        let panelOrologio = document.getElementById("tnt-orologio-panel");
+        if (!document.getElementById("tnt-orologio-btn")) {
+            const disegnoOrologio = '<circle cx="23" cy="23" r="13" fill="none" stroke="#ffffff" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>';
+            const btn = creaIconaMenu("tnt-orologio-btn", "#000000", disegnoOrologio);
+            btn.title = "Unit Ready in scadenza (Outbound)";
+            menu.appendChild(btn);
+            panelOrologio = creaPannello("tnt-orologio-panel", "Carico - unit ready in scadenza", "#ffffff");
+            collegaClick(btn, panelOrologio, aggiornaPannelloOutbound, ORDINE_GRUPPO_CARICO_SCARICO);
         }
     }
 
