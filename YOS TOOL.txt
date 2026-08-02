@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.6
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        GM_xmlhttpRequest
