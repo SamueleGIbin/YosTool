@@ -6,6 +6,9 @@
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        GM_xmlhttpRequest
 // @connect      yostool-default-rtdb.firebaseio.com
+// @connect      identitytoolkit.googleapis.com
+// @connect      securetoken.googleapis.com
+// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
 // @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL.txt
 // @downloadURL  https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL.txt
 // ==/UserScript==
@@ -17,7 +20,7 @@
         ATTIVO: true,
         BASE_URL: "https://yostool-default-rtdb.firebaseio.com",
         PATH: "dati/turno-condiviso.json",
-        SECRET: "9HmZEAQK5NksTxew4EzvoCmuT2HQ0CSBjQULzY0p",
+        WEB_API_KEY: "AIzaSyAjl7ZVqQqIh6rAhMyPLRNMz5ouSvO5hts",
         INTERVALLO_MS: 15000
     };
 
@@ -296,16 +299,12 @@
                 modificato = true;
 
                 if (cambiaUnit) registraInStoricoReport(doorNumber, unitId, orario);
+                if (cambiaUnit && categoriaBaia(doorNumber) === "Scarico") avviaSessioneScarico(doorNumber, unitId, orario);
                 const catPerVerifica = categoriaBaia(doorNumber);
                 if ((catPerVerifica === "Scarico" || catPerVerifica === "Parcheggio") && (cambiaUnit || orarioCambiato)) accodaVerificaBaia(doorNumber, unitId);
             } else if (esistente && esistente.action !== unit.currentAction) {
                 arrivi[doorNumber] = { unitId: unitId, orario: esistente.orario, action: unit.currentAction };
                 modificato = true;
-            }
-            if (categoriaBaia(doorNumber) === "Scarico" && !sessioniScaricoInCorso.has(doorNumber)) {
-                const registrato = arrivi[doorNumber];
-                const orarioInizio = registrato ? registrato.orario : new Date().toISOString();
-                avviaSessioneScarico(doorNumber, unitId, orarioInizio);
             }
         });
         if (modificato) salvaArriviBaia(arrivi);
@@ -432,8 +431,7 @@
     const SOGLIA_SCARICO_MINUTI = 500;
     const MARGINE_MINIMO_DOMESTICO_MINUTI = 60;
     const MARGINE_MINIMO_INTERNAZIONALE_MINUTI = 150;
-    const SOGLIA_RIAPERTURA_MARGINE_MINUTI = 150;
-    const ORARIO_RIAPERTURA_DOMENICA_MINUTI = 20 * 60 + 30;
+    const ORARIO_RIAPERTURA_DOMENICA_MINUTI = 21 * 60 + 30;
 
     const CODICI_INTERNAZIONALI = new Set([
         "BCN", "XXJ", "LUG", "MAD", "HNJ", "MRS", "PRG", "MV9", "LYS", "SKG", "ATH",
@@ -472,17 +470,18 @@
     function eOrarioDiChiusura(data) {
         const giorno = data.getDay();
         const minutiGiorno = data.getHours() * 60 + data.getMinutes();
-        if (giorno === 5 && minutiGiorno >= 2 * 60) return true;
+        if (giorno === 5 && minutiGiorno >= 9 * 60) return true;
         if (giorno === 6) return true;
-        if (giorno === 0 && minutiGiorno < ORARIO_RIAPERTURA_DOMENICA_MINUTI + SOGLIA_RIAPERTURA_MARGINE_MINUTI) return true;
+        if (giorno === 0 && minutiGiorno < ORARIO_RIAPERTURA_DOMENICA_MINUTI) return true;
         return false;
     }
 
     function trovaProssimoCutoffConMargine(cutoffBase, arrivoPortaReale, margineMinimo) {
+        const ancora = arrivoPortaReale && !isNaN(arrivoPortaReale.getTime()) && arrivoPortaReale.getTime() > cutoffBase.getTime() ? arrivoPortaReale : cutoffBase;
         const candidati = [];
         for (let offset = 0; offset <= 5; offset++) {
             SLOT_CUTOFF_UNICI.forEach((slot) => {
-                const d = new Date(cutoffBase.getFullYear(), cutoffBase.getMonth(), cutoffBase.getDate() + offset, slot.ore, slot.min, 0, 0);
+                const d = new Date(ancora.getFullYear(), ancora.getMonth(), ancora.getDate() + offset, slot.ore, slot.min, 0, 0);
                 if (d.getTime() > cutoffBase.getTime() && !eOrarioDiChiusura(d)) candidati.push(d);
             });
         }
@@ -972,8 +971,62 @@
         return m ? m[1] : null;
     }
 
+    const AUTH_STORAGE_KEY = "yosToolFirebaseAuth";
+
+    function leggiAuthSalvato() {
+        try {
+            const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+            return raw ? JSON.parse(raw) : null;
+        } catch (e) { return null; }
+    }
+
+    function scriviAuthSalvato(auth) {
+        try { localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(auth)); } catch (e) {}
+    }
+
+    async function firebaseCreaSessioneAnonima() {
+        const res = await gmRequest({
+            method: "POST",
+            url: "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=" + FIREBASE_SYNC.WEB_API_KEY,
+            headers: { "Content-Type": "application/json" },
+            data: JSON.stringify({ returnSecureToken: true })
+        });
+        if (res.status < 200 || res.status >= 300) throw new Error("Firebase Auth signUp " + res.status);
+        const dati = JSON.parse(res.responseText);
+        const auth = { idToken: dati.idToken, refreshToken: dati.refreshToken, scadenza: Date.now() + Number(dati.expiresIn) * 1000 };
+        scriviAuthSalvato(auth);
+        return auth;
+    }
+
+    async function firebaseRinnovaSessione(refreshToken) {
+        const res = await gmRequest({
+            method: "POST",
+            url: "https://securetoken.googleapis.com/v1/token?key=" + FIREBASE_SYNC.WEB_API_KEY,
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            data: "grant_type=refresh_token&refresh_token=" + encodeURIComponent(refreshToken)
+        });
+        if (res.status < 200 || res.status >= 300) throw new Error("Firebase Auth refresh " + res.status);
+        const dati = JSON.parse(res.responseText);
+        const auth = { idToken: dati.id_token, refreshToken: dati.refresh_token, scadenza: Date.now() + Number(dati.expires_in) * 1000 };
+        scriviAuthSalvato(auth);
+        return auth;
+    }
+
+    async function otteniIdTokenValido() {
+        let auth = leggiAuthSalvato();
+        if (auth && auth.scadenza > Date.now() + 60000) return auth.idToken;
+        try {
+            if (auth && auth.refreshToken) auth = await firebaseRinnovaSessione(auth.refreshToken);
+            else auth = await firebaseCreaSessioneAnonima();
+        } catch (e) {
+            auth = await firebaseCreaSessioneAnonima();
+        }
+        return auth.idToken;
+    }
+
     async function firebaseLeggiFile() {
-        const url = FIREBASE_SYNC.BASE_URL + "/" + FIREBASE_SYNC.PATH + "?auth=" + FIREBASE_SYNC.SECRET;
+        const idToken = await otteniIdTokenValido();
+        const url = FIREBASE_SYNC.BASE_URL + "/" + FIREBASE_SYNC.PATH + "?auth=" + idToken;
         const res = await gmRequest({
             method: "GET",
             url,
@@ -992,7 +1045,8 @@
     }
 
     async function firebaseScriviFile(dati, etag) {
-        const url = FIREBASE_SYNC.BASE_URL + "/" + FIREBASE_SYNC.PATH + "?auth=" + FIREBASE_SYNC.SECRET;
+        const idToken = await otteniIdTokenValido();
+        const url = FIREBASE_SYNC.BASE_URL + "/" + FIREBASE_SYNC.PATH + "?auth=" + idToken;
         const headers = { "Content-Type": "application/json" };
         if (etag) headers["if-match"] = etag;
         const res = await gmRequest({
@@ -1186,11 +1240,22 @@
         let codiceOrigine = "N/A";
         let localita = "N/A";
         let viaggio = "N/A";
+        let destinazione = "N/A";
+        let arrivoSchedulato = "N/A";
+        let arrivoStimato = "N/A";
+        let arrivoReale = "N/A";
         let cutoffOrario = "N/A";
         let cutoffTurno = "N/A";
         let cutoffTipo = "N/A";
         let ritardoFlag = "No";
         let cutoffOriginaleTesto = "";
+
+        function formattaOra(iso) {
+            if (!iso) return "N/A";
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return "N/A";
+            return String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0") + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+        }
 
         if (unitId) {
             const mov = cacheMovimentiPerUnit.get(String(unitId));
@@ -1199,6 +1264,10 @@
                 localita = codeMap[codiceOrigine] || "N/A";
                 viaggio = mov.movementName || "N/A";
                 if (mov.tripTourDescription) viaggio += " (" + mov.tripTourDescription + ")";
+                destinazione = mov.destination || "N/A";
+                arrivoSchedulato = formattaOra(mov.scheduleArrival);
+                arrivoStimato = formattaOra(mov.estimatedArrival);
+                arrivoReale = formattaOra(mov.actualArrival);
 
                 const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
                 if (arrivoIso) {
@@ -1227,6 +1296,10 @@
             codiceOrigine,
             localita,
             viaggio,
+            destinazione,
+            arrivoSchedulato,
+            arrivoStimato,
+            arrivoReale,
             cutoffOrario,
             cutoffTurno,
             cutoffTipo,
@@ -1238,14 +1311,8 @@
     }
 
     function caricaLibreriaXLSX() {
-        return new Promise((resolve, reject) => {
-            if (window.XLSX) { resolve(window.XLSX); return; }
-            const script = document.createElement("script");
-            script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
-            script.onload = () => resolve(window.XLSX);
-            script.onerror = () => reject(new Error("Impossibile caricare la libreria Excel (controlla la connessione)"));
-            document.head.appendChild(script);
-        });
+        if (window.XLSX) return Promise.resolve(window.XLSX);
+        return Promise.reject(new Error("Libreria Excel non disponibile: aggiorna Tampermonkey e riapri la pagina"));
     }
 
     function costruisciDataOra(dataStr, oraStr, oraFallback) {
@@ -1316,6 +1383,10 @@
             "Codice Origine": r.codiceOrigine,
             "Localita (tradotta)": r.localita,
             "Info Viaggio": r.viaggio,
+            "Destinazione": r.destinazione || "N/A",
+            "Arrivo Schedulato": r.arrivoSchedulato || "N/A",
+            "Arrivo Stimato": r.arrivoStimato || "N/A",
+            "Arrivo Reale": r.arrivoReale || "N/A",
             "Ora Cutoff": r.cutoffOrario,
             "Turno": r.cutoffTurno,
             "Categoria Cutoff": r.cutoffTipo,
@@ -1631,11 +1702,11 @@
             e.stopPropagation();
             const dataInizio = document.getElementById("tnt-report-data-inizio").value;
             const dataFine = document.getElementById("tnt-report-data-fine").value;
-            scaricaReportExcel(dataInizio || null, dataFine || null);
+            scaricaReportExcel(dataInizio || null, dataFine || null).catch((err) => alert("Errore export Excel: " + err.message));
         });
         document.getElementById("tnt-report-btn-tutto").addEventListener("click", (e) => {
             e.stopPropagation();
-            scaricaReportExcel(null, null);
+            scaricaReportExcel(null, null).catch((err) => alert("Errore export Excel: " + err.message));
         });
     }
 
