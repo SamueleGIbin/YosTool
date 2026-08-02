@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        GM_xmlhttpRequest
@@ -130,6 +130,29 @@
     const cacheMovimentiPerUnit = new Map();
     const cacheCutoffPerBaia = new Map();
     const cacheRemarksPerBaia = new Map();
+
+    // Evita che il cutoff di un mezzo precedente (o di un pannello DOM residuo)
+    // resti "incollato" alla baia quando arriva un nuovo mezzo: ogni voce di
+    // cache è legata all'unitId realmente presente in quella baia in questo momento
+    // e, quando disponibile, viene incrociata con l'origine reale del mezzo.
+    function impostaCacheCutoffBaia(doorNumber, risultato, codiceOrigine) {
+        if (!doorNumber || !risultato) return;
+        const voce = caricaArriviBaia()[doorNumber];
+        if (!voce || !voce.unitId) return;
+        const mov = cacheMovimentiPerUnit.get(String(voce.unitId));
+        if (mov && mov.origin && codiceOrigine && mov.origin !== codiceOrigine) return;
+        cacheCutoffPerBaia.set(doorNumber, { unitId: String(voce.unitId), risultato: risultato });
+    }
+    function leggiCacheCutoffBaia(doorNumber) {
+        const voce = cacheCutoffPerBaia.get(doorNumber);
+        if (!voce) return null;
+        const attuale = caricaArriviBaia()[doorNumber];
+        if (!attuale || !attuale.unitId || String(attuale.unitId) !== voce.unitId) {
+            cacheCutoffPerBaia.delete(doorNumber);
+            return null;
+        }
+        return voce.risultato;
+    }
     const unitGiaScaricati = new Map();
     const SCADENZA_REMARKS_ORE = 12;
 
@@ -355,7 +378,7 @@
             const arrivi = caricaArriviBaia();
             const attuale = arrivi[voce.doorNumber];
             if (!attuale || String(attuale.unitId) !== voce.unitId) { codaInLavorazione = false; return; }
-            if (cacheCutoffPerBaia.has(voce.doorNumber) || calcolaCutoffDaCacheMovimenti(voce.doorNumber)) {
+            if (leggiCacheCutoffBaia(voce.doorNumber) || calcolaCutoffDaCacheMovimenti(voce.doorNumber)) {
                 unitVerificatiCutoff.add(voce.unitId);
                 codaInLavorazione = false;
                 return;
@@ -369,7 +392,7 @@
             await new Promise((r) => setTimeout(r, 500));
             const info = leggiCutoffBaiaCorrente();
             if (info) {
-                cacheCutoffPerBaia.set(voce.doorNumber, info.cutoff);
+                impostaCacheCutoffBaia(voce.doorNumber, info.cutoff, info.codice);
                 unitVerificatiCutoff.add(voce.unitId);
             } else {
                 voce.tentativi = (voce.tentativi || 0) + 1;
@@ -717,7 +740,7 @@
                 }
                 if (baiaSelezionata && codiceOrigine && !eBaiaCarico) registraArrivoDaTripDetailsSeMancante(baiaSelezionata, codiceOrigine, tripId, testoActualArrivo, risultato);
                 aggiornaRigaArrivoECountdown(contenitore, risultato, eBaiaCarico);
-                if (risultato && baiaSelezionata && !eBaiaCarico) cacheCutoffPerBaia.set(baiaSelezionata, risultato);
+                if (risultato && baiaSelezionata && !eBaiaCarico) impostaCacheCutoffBaia(baiaSelezionata, risultato, codiceOrigine);
                 if (!origineEl || !arrivoEl) return;
                 const chiave = codiceOrigine + "|" + testoArrivo + "|" + testoActualArrivo + "|" + testoArrivoPorta;
                 if (sezione.getAttribute("data-tnt-turno-key") === chiave) return;
@@ -861,7 +884,7 @@
             tripTourDescription: "",
             vistoIl: Date.now()
         });
-        if (risultato) cacheCutoffPerBaia.set(doorNumber, risultato);
+        if (risultato) impostaCacheCutoffBaia(doorNumber, risultato, codiceOrigine);
         registraInStoricoReport(doorNumber, idFallback, orarioFallback);
     }
 
@@ -1844,13 +1867,13 @@
             if (categoriaBaia(baia.doorNumber) === "Parcheggio" && voceBaia && unitGiaScaricati.has(String(voceBaia.unitId))) continue;
             let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
             if (!infoCutoff) {
-                const cutoffCachato = cacheCutoffPerBaia.get(baia.doorNumber);
+                const cutoffCachato = leggiCacheCutoffBaia(baia.doorNumber);
                 if (cutoffCachato) infoCutoff = { cutoff: cutoffCachato, codice: null };
             }
             if (!infoCutoff && baiaSelezionata === baia.doorNumber) {
                 assicuraTabInbound();
                 infoCutoff = leggiCutoffBaiaCorrente();
-                if (infoCutoff) cacheCutoffPerBaia.set(baia.doorNumber, infoCutoff.cutoff);
+                if (infoCutoff) impostaCacheCutoffBaia(baia.doorNumber, infoCutoff.cutoff, infoCutoff.codice);
             }
             if (!infoCutoff) continue;
             aggiungiAlGruppo(infoCutoff.cutoff, baia.doorNumber);
