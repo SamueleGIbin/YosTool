@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @grant        GM_xmlhttpRequest
@@ -544,9 +544,12 @@
         if (arrivoPortaReale && !isNaN(arrivoPortaReale.getTime()) && arrivoPortaReale.getTime() > arrivo.getTime()) {
             const margineReale = (risultato.cutoffDate.getTime() - arrivoPortaReale.getTime()) / 60000;
             if (margineReale < margineMinimo) {
+                const cutoffOriginaleGiaPassato = risultato.cutoffDate.getTime() <= arrivoPortaReale.getTime();
                 const nuovoCutoff = trovaProssimoCutoffConMargine(risultato.cutoffDate, arrivoPortaReale, margineMinimo);
                 if (nuovoCutoff) {
-                    risultato = { cat: risultato.cat, cutoffDate: nuovoCutoff, cutoffOriginale: risultato.cutoffDate, ritardo: true, margineMinimo: margineMinimo };
+                    risultato = cutoffOriginaleGiaPassato
+                        ? { cat: risultato.cat, cutoffDate: nuovoCutoff, ritardo: false }
+                        : { cat: risultato.cat, cutoffDate: nuovoCutoff, cutoffOriginale: risultato.cutoffDate, ritardo: true, margineMinimo: margineMinimo };
                 }
             }
         }
@@ -866,7 +869,6 @@
         return risultati;
     }
 
-    const COLORE_BAIA_PARZIALE = "rgb(255,217,127)";
     function trovaBaieFreightParziali() {
         const risultati = new Set();
         function estraiDoorNumber(wrapper) {
@@ -875,19 +877,6 @@
         }
         document.querySelectorAll('[id^="container_"].partiallyloaded_outline').forEach((el) => {
             const wrapper = el.closest('[id^="unit_"]');
-            if (!wrapper) return;
-            const doorNumber = estraiDoorNumber(wrapper);
-            if (!doorNumber || categoriaBaia(doorNumber) !== "Freight") return;
-            risultati.add(doorNumber);
-        });
-        document.querySelectorAll('[id^="dockingBg_"]').forEach((bg) => {
-            let colore = bg.style && bg.style.backgroundColor ? bg.style.backgroundColor : "";
-            if (!colore && window.getComputedStyle) {
-                try { colore = window.getComputedStyle(bg).backgroundColor || ""; } catch (e) {}
-            }
-            colore = colore.replace(/\s+/g, "");
-            if (colore !== COLORE_BAIA_PARZIALE) return;
-            const wrapper = bg.closest('[id^="unit_"]');
             if (!wrapper) return;
             const doorNumber = estraiDoorNumber(wrapper);
             if (!doorNumber || categoriaBaia(doorNumber) !== "Freight") return;
