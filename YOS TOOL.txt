@@ -1,13 +1,16 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      1.7
-// @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico
+// @version      1.8
+// @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni
 // @match        https://yos.apps.tnt.com/hub-overview*
+// @match        https://ot-splunk1.corp.ds.fedex.com/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_cookie
 // @connect      yostool-default-rtdb.firebaseio.com
 // @connect      identitytoolkit.googleapis.com
 // @connect      securetoken.googleapis.com
+// @connect      ot-splunk1.corp.ds.fedex.com
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
 // @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL.txt
 // @downloadURL  https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL.txt
@@ -15,6 +18,7 @@
 
 (function () {
     'use strict';
+    if (location.hostname !== "yos.apps.tnt.com") return;
 
     const FIREBASE_SYNC = {
         ATTIVO: true,
@@ -455,6 +459,100 @@
     const ORARIO_CHIUSURA_SABATO_MINUTI = 2 * 60;
     const ORARIO_RIAPERTURA_DOMENICA_MINUTI = 21 * 60 + 30;
 
+    function calcolaInizioTurnoCorrente(riferimento) {
+        const now = riferimento || new Date();
+        const giorno = now.getDay();
+        const minutiOggi = now.getHours() * 60 + now.getMinutes();
+        const POMERIGGIO_MIN = 16 * 60;
+        function dataOra(offsetGiorni, ore, minuti) {
+            return new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetGiorni, ore, minuti, 0, 0);
+        }
+        if (giorno === 0) {
+            if (minutiOggi >= 20 * 60 + 15) return dataOra(0, 20, 15);
+            return dataOra(-1, 16, 0);
+        }
+        if (giorno === 5) {
+            if (minutiOggi >= POMERIGGIO_MIN) return dataOra(0, 16, 0);
+            return dataOra(-1, 16, 0);
+        }
+        if (minutiOggi >= POMERIGGIO_MIN) return dataOra(0, 16, 0);
+        return dataOra(0, 0, 0);
+    }
+
+    function tipoTurnoDaInizio(d) {
+        const h = d.getHours();
+        return h === 0 ? "Notte" : "Pomeriggio";
+    }
+
+    const STORAGE_KEY_COLLI_STORICO = "tnt_colli_storico_v1";
+    function chiaveColliStorico(r) { return r.inizioTurnoIso; }
+    function caricaColliStorico() {
+        try { const raw = localStorage.getItem(STORAGE_KEY_COLLI_STORICO); const arr = raw ? JSON.parse(raw) : []; return Array.isArray(arr) ? arr : []; } catch (e) { return []; }
+    }
+    function salvaColliStorico(arr) {
+        try { localStorage.setItem(STORAGE_KEY_COLLI_STORICO, JSON.stringify(arr)); } catch (e) {}
+    }
+    function unisciColliStorico(listaA, listaB) {
+        const mappa = new Map();
+        listaA.concat(listaB).forEach((r) => {
+            if (!r || !r.inizioTurnoIso) return;
+            const esistente = mappa.get(chiaveColliStorico(r));
+            if (!esistente || (r.valore || 0) > (esistente.valore || 0)) mappa.set(chiaveColliStorico(r), r);
+        });
+        const limite = Date.now() - GIORNI_STORICO_TREND * 24 * 60 * 60 * 1000;
+        return Array.from(mappa.values()).filter((r) => new Date(r.inizioTurnoIso).getTime() >= limite).sort((a, b) => new Date(a.inizioTurnoIso) - new Date(b.inizioTurnoIso));
+    }
+
+    function archiviaColliSeTurnoCambiato(nuovoInizioTurnoIso) {
+        const attuale = caricaColliLocali();
+        if (attuale && attuale.inizioTurnoIso && attuale.inizioTurnoIso !== nuovoInizioTurnoIso && typeof attuale.valore === "number") {
+            const storico = caricaColliStorico();
+            storico.push({ inizioTurnoIso: attuale.inizioTurnoIso, valore: attuale.valore, tipoTurno: tipoTurnoDaInizio(new Date(attuale.inizioTurnoIso)) });
+            salvaColliStorico(unisciColliStorico(storico, []));
+        }
+    }
+
+    function statisticheColli() {
+        const attuale = caricaColliLocali();
+        if (!attuale || typeof attuale.valore !== "number" || !attuale.inizioTurnoIso) return null;
+        const inizioTurno = new Date(attuale.inizioTurnoIso);
+        const oreTrascorse = Math.max((Date.now() - inizioTurno.getTime()) / 3600000, 0.1);
+        const mediaOraria = attuale.valore / oreTrascorse;
+        const tipoAttuale = tipoTurnoDaInizio(inizioTurno);
+        const ordinato = caricaColliStorico().slice().sort((a, b) => new Date(b.inizioTurnoIso) - new Date(a.inizioTurnoIso));
+        const turnoPrecedente = ordinato[0] || null;
+        const turnoStessoIeri = ordinato.find((r) => r.tipoTurno === tipoAttuale) || null;
+        return { attuale, inizioTurno, oreTrascorse, mediaOraria, tipoAttuale, turnoPrecedente, turnoStessoIeri };
+    }
+    const STORAGE_KEY_COLLI_IMPOSTAZIONI = "tnt_colli_impostazioni_v1";
+    function caricaImpostazioniColli() {
+        try {
+            const raw = localStorage.getItem(STORAGE_KEY_COLLI_IMPOSTAZIONI);
+            const obj = raw ? JSON.parse(raw) : {};
+            return { auto: obj.auto !== false, manuale: !!obj.manuale, orarioManuale: obj.orarioManuale || "16:00" };
+        } catch (e) { return { auto: true, manuale: false, orarioManuale: "16:00" }; }
+    }
+    function salvaImpostazioniColli(obj) {
+        try { localStorage.setItem(STORAGE_KEY_COLLI_IMPOSTAZIONI, JSON.stringify(obj)); } catch (e) {}
+    }
+    function calcolaInizioDatiColli() {
+        const imp = caricaImpostazioniColli();
+        if (imp.manuale && /^\d{2}:\d{2}$/.test(imp.orarioManuale)) {
+            const [h, m] = imp.orarioManuale.split(":").map(Number);
+            const now = new Date();
+            const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+            if (d.getTime() > now.getTime()) d.setDate(d.getDate() - 1);
+            return d;
+        }
+        return calcolaInizioTurnoCorrente();
+    }
+
+    const SPLUNK_URL_BASE = "https://ot-splunk1.corp.ds.fedex.com/en-US/app/fedex_uds_operational_reporting/report_imr_control_room_rev01_06_clone";
+    function costruisciUrlSplunk() {
+        const earliest = calcolaInizioDatiColli().toISOString();
+        return SPLUNK_URL_BASE + "?tab=layout_1&form.global_time.earliest=" + encodeURIComponent(earliest) + "&form.global_time.latest=now&form.p_site=IMRH&form.input_sortarea=*&form.p_sortplan=*";
+    }
+
     const CODICI_INTERNAZIONALI = new Set([
         "BCN", "XXJ", "LUG", "MAD", "HNJ", "MRS", "PRG", "MV9", "LYS", "SKG", "ATH",
         "DFT", "DFT*", "DNG", "DNG*", "XWT", "WA1", "BZQ", "QAR", "IIM", "LJU", "ZRH", "ECL", "KCW"
@@ -567,6 +665,8 @@
         ".tnt-panel-title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;color:#f2f2f2;}",
         ".tnt-panel-close{cursor:pointer;color:#c7c7cc;font-size:18px;line-height:1;padding:2px 6px;border-radius:4px;}",
         ".tnt-panel-close:hover{background:#2c2c2e;color:#ffffff;}",
+        ".tnt-panel-refresh{cursor:pointer;color:#c7c7cc;font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;}",
+        ".tnt-panel-refresh:hover{background:#2c2c2e;color:#ffffff;}",
         ".tnt-panel-body{flex:1 1 auto;overflow-y:auto;padding:10px;transform:translateZ(0);-webkit-transform:translateZ(0);will-change:transform;contain:layout paint style;}",
         ".tnt-group-label{color:#c7c7cc;font-size:11px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;padding:10px 6px 6px;}",
         ".tnt-group-label:first-child{padding-top:2px;}",
@@ -1021,8 +1121,7 @@
     function gmRequest(dettagli) {
         return new Promise((resolve, reject) => {
             if (typeof GM_xmlhttpRequest !== "function") { reject(new Error("Rete: GM_xmlhttpRequest non disponibile")); return; }
-            GM_xmlhttpRequest(Object.assign({}, dettagli, {
-                timeout: 15000,
+            GM_xmlhttpRequest(Object.assign({ timeout: 15000 }, dettagli, {
                 onload: (res) => resolve(res),
                 onerror: () => reject(new Error("Rete: richiesta fallita")),
                 ontimeout: () => reject(new Error("Rete: timeout")),
@@ -1101,11 +1200,13 @@
         if (res.status < 200 || res.status >= 300) throw new Error("Firebase GET " + res.status);
         let dati = null;
         try { dati = JSON.parse(res.responseText); } catch (e) { dati = null; }
-        if (!dati || typeof dati !== "object") dati = { versione: VERSIONE_DATI, storico: [], sessioni: [], presenze: {}, remarksBaie: {} };
+        if (!dati || typeof dati !== "object") dati = { versione: VERSIONE_DATI, storico: [], sessioni: [], presenze: {}, remarksBaie: {}, colliTotali: null, colliStorico: [] };
         if (!Array.isArray(dati.storico)) dati.storico = [];
         if (!Array.isArray(dati.sessioni)) dati.sessioni = [];
         if (!dati.presenze || typeof dati.presenze !== "object") dati.presenze = {};
         if (!dati.remarksBaie || typeof dati.remarksBaie !== "object") dati.remarksBaie = {};
+        if (!dati.colliTotali || typeof dati.colliTotali.valore !== "number") dati.colliTotali = null;
+        if (!Array.isArray(dati.colliStorico)) dati.colliStorico = [];
         if (typeof dati.versione !== "number") dati.versione = 0;
         return { dati, etag: estraiETag(res) };
     }
@@ -1156,13 +1257,204 @@
         return Object.keys(presenze || {}).filter((id) => (presenze[id] || "").slice(0, 10) === oggi).length;
     }
 
+    const STORAGE_KEY_COLLI = "tnt_colli_totali_v1";
+
+    function caricaColliLocali() {
+        try { const raw = localStorage.getItem(STORAGE_KEY_COLLI); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+    }
+    function salvaColliLocali(obj) {
+        try { localStorage.setItem(STORAGE_KEY_COLLI, JSON.stringify(obj)); } catch (e) {}
+    }
+
+    const SPLUNK_HOST = "https://ot-splunk1.corp.ds.fedex.com";
+    const SPLUNK_SPL = 'search index=ops_reporting_detail location_id="IMRH" sort_area_type="*" sortplan="*" | fields barcode, sort_result, uniqueId | search sort_result IN ("SORTED", "REJECT", "LOST", "OVERFLOW") | stats dc(barcode)';
+
+    function ottieniCsrfSplunk() {
+        return new Promise((resolve) => {
+            if (typeof GM_cookie === "undefined" || typeof GM_cookie.list !== "function") { resolve({ valore: null, debug: "GM_cookie non disponibile (manca permesso Tampermonkey)" }); return; }
+            GM_cookie.list({ url: SPLUNK_HOST + "/" }, (cookies, error) => {
+                if (error) { resolve({ valore: null, debug: "errore GM_cookie: " + error }); return; }
+                if (!cookies || cookies.length === 0) { resolve({ valore: null, debug: "0 cookie letti per " + SPLUNK_HOST }); return; }
+                const c = cookies.find((k) => /csrf/i.test(k.name));
+                resolve({ valore: c ? c.value : null, debug: cookies.length + " cookie letti: " + cookies.map((k) => k.name).join(", ") });
+            });
+        });
+    }
+
+    async function recuperaColliDaSplunk() {
+        const earliest = String(Math.floor(calcolaInizioDatiColli().getTime() / 1000));
+        const corpo = "output_mode=json&earliest_time=" + encodeURIComponent(earliest) + "&latest_time=now&search=" + encodeURIComponent(SPLUNK_SPL);
+        const csrfInfo = await ottieniCsrfSplunk();
+        const headers = { "Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest" };
+        if (csrfInfo.valore) headers["X-Splunk-Form-Key"] = csrfInfo.valore;
+        const res = await gmRequest({
+            method: "POST",
+            url: SPLUNK_HOST + "/en-US/splunkd/__raw/services/search/jobs/export",
+            headers: headers,
+            anonymous: false,
+            timeout: 60000,
+            data: corpo
+        });
+        if (res.status === 401 || res.status === 403) throw new Error("Splunk " + res.status + " (csrf " + (csrfInfo.valore ? "trovato" : "NON trovato, " + csrfInfo.debug) + "): " + (res.responseText ? res.responseText.slice(0, 200).replace(/\s+/g, " ") : "risposta vuota"));
+        if (res.status < 200 || res.status >= 300) throw new Error("Splunk ha risposto " + res.status + (res.responseText ? ": " + res.responseText.slice(0, 200).replace(/\s+/g, " ") : ""));
+        let valore = null;
+        res.responseText.split("\n").filter(Boolean).forEach((riga) => {
+            try {
+                const obj = JSON.parse(riga);
+                const r = obj && obj.result;
+                if (!r) return;
+                const chiave = Object.keys(r).find((k) => /dc\(barcode\)/i.test(k));
+                if (chiave && r[chiave] !== undefined) valore = parseInt(String(r[chiave]).replace(/[^\d]/g, ""), 10);
+            } catch (e) {}
+        });
+        if (valore === null || isNaN(valore)) throw new Error("nessun dato ricevuto da Splunk (risposta: " + res.responseText.slice(0, 200).replace(/\s+/g, " ") + ")");
+        return valore;
+    }
+
+    let ultimoErroreColli = null;
+    let aggiornamentoColliInCorso = false;
+    async function aggiornaColliAutomatico() {
+        if (aggiornamentoColliInCorso) return;
+        aggiornamentoColliInCorso = true;
+        const btnAggiorna = document.getElementById("tnt-colli-aggiorna-ora");
+        if (btnAggiorna) btnAggiorna.textContent = "Aggiorno...";
+        try {
+            const valore = await recuperaColliDaSplunk();
+            const inizioTurnoIso = calcolaInizioDatiColli().toISOString();
+            archiviaColliSeTurnoCambiato(inizioTurnoIso);
+            const oggetto = { valore, aggiornatoIl: new Date().toISOString(), aggiornatoDa: DEVICE_ID, inizioTurnoIso };
+            salvaColliLocali(oggetto);
+            ultimoErroreColli = null;
+            pianificaSincronizzazione(500);
+        } catch (e) {
+            ultimoErroreColli = e.message;
+        } finally {
+            aggiornamentoColliInCorso = false;
+            aggiornaVisualizzazioneColli();
+        }
+    }
+
+    function aggiornaVisualizzazioneColli() {
+        const panel = document.getElementById("tnt-colli-panel");
+        const body = document.getElementById("tnt-colli-panel-body");
+        if (panel && body && pannelloAperto(panel)) renderPannelloProduttivita(body);
+    }
+
+    function renderPannelloProduttivita(body) {
+        const imp = caricaImpostazioniColli();
+        const locale = caricaColliLocali();
+        const inizioAttuale = calcolaInizioDatiColli();
+        const hhI = String(inizioAttuale.getHours()).padStart(2, "0");
+        const mmI = String(inizioAttuale.getMinutes()).padStart(2, "0");
+        let statoTxt = "--";
+        let aggiornatoTxt = "Non ancora aggiornato";
+        if (locale && typeof locale.valore === "number") {
+            statoTxt = locale.valore.toLocaleString("it-IT") + " colli";
+            const d = new Date(locale.aggiornatoIl);
+            aggiornatoTxt = "Colli aggiornati alle ore " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+        }
+        body.innerHTML =
+            '<div class="tnt-card"><div class="tnt-card-title">' + statoTxt + '</div>'
+                + '<div class="tnt-card-sub">' + aggiornatoTxt + '</div>'
+                + '<div class="tnt-card-sub">Dati dalle ore ' + hhI + ':' + mmI + '</div>'
+            + '</div>'
+            + (ultimoErroreColli ? '<div style="font-size:11px;color:#E24B4A;margin-bottom:8px;">Aggiornamento automatico non riuscito: ' + escapeHtml(ultimoErroreColli) + '</div>' : '')
+            + '<button id="tnt-colli-aggiorna-ora" class="tnt-btn-primary">Aggiorna ora</button>'
+            + '<label style="display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;"><input type="checkbox" id="tnt-colli-auto" ' + (imp.auto ? "checked" : "") + '> Aggiornamento automatico ogni 30 min</label>'
+            + '<label style="display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;"><input type="checkbox" id="tnt-colli-manuale" ' + (imp.manuale ? "checked" : "") + '> Imposta a mano da che ora prendere i dati</label>'
+            + '<input type="time" id="tnt-colli-orario-manuale" value="' + imp.orarioManuale + '" ' + (imp.manuale ? "" : "disabled") + ' style="display:block;width:100%;box-sizing:border-box;margin:0 0 10px;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;">'
+            + '<a href="' + costruisciUrlSplunk() + '" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8B5CF6;margin:4px 0 10px;">Apri la stessa ricerca su Splunk &#8599;</a>';
+
+        document.getElementById("tnt-colli-aggiorna-ora").addEventListener("click", (e) => { e.stopPropagation(); aggiornaColliAutomatico(); });
+        document.getElementById("tnt-colli-auto").addEventListener("change", (e) => {
+            const i = caricaImpostazioniColli(); i.auto = e.target.checked; salvaImpostazioniColli(i);
+        });
+        document.getElementById("tnt-colli-manuale").addEventListener("change", (e) => {
+            const i = caricaImpostazioniColli(); i.manuale = e.target.checked; salvaImpostazioniColli(i);
+            renderPannelloProduttivita(body);
+        });
+        document.getElementById("tnt-colli-orario-manuale").addEventListener("change", (e) => {
+            const i = caricaImpostazioniColli(); i.orarioManuale = e.target.value || "16:00"; salvaImpostazioniColli(i);
+            renderPannelloProduttivita(body);
+        });
+    }
+
     function creaBadgeSync() {
-        if (document.getElementById("tnt-badge-sync")) return;
-        const badge = document.createElement("div");
-        badge.id = "tnt-badge-sync";
-        badge.style.cssText = "position:fixed;top:6px;left:50%;transform:translateX(-50%);z-index:999998;display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-family:Roboto,sans-serif;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);";
-        badge.innerHTML = '<span id="tnt-badge-dot" style="width:8px;height:8px;border-radius:50%;background:#777;flex-shrink:0;"></span><span id="tnt-badge-testo">Sync...</span>';
-        document.body.appendChild(badge);
+        if (document.getElementById("tnt-top-badges")) return;
+        const wrapper = document.createElement("div");
+        wrapper.id = "tnt-top-badges";
+        wrapper.style.cssText = "position:fixed;top:6px;left:50%;transform:translateX(-50%);z-index:999998;display:flex;align-items:center;gap:8px;font-family:Roboto,sans-serif;";
+        wrapper.innerHTML =
+            '<div id="tnt-badge-colli" title="Productivity - colli lavorati" style="display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);cursor:pointer;">'
+                + '<span style="color:#8B5CF6;">&#9679;</span><span>Productivity</span>'
+            + '</div>'
+            + '<div id="tnt-badge-sync" style="display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);">'
+                + '<span id="tnt-badge-dot" style="width:8px;height:8px;border-radius:50%;background:#777;flex-shrink:0;"></span><span id="tnt-badge-testo">Sync...</span>'
+            + '</div>';
+        document.body.appendChild(wrapper);
+
+        const btnColli = document.getElementById("tnt-badge-colli");
+        const panelColli = creaPannello("tnt-colli-panel", "Productivity - Colli turno", "#8B5CF6");
+        panelColli.style.width = "280px";
+        panelColli.style.border = "1px solid #333";
+        panelColli.style.borderRadius = "10px";
+        btnColli.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const eraAperto = pannelloAperto(panelColli);
+            chiudiTuttiIPannelli();
+            if (eraAperto) return;
+            panelColli.style.display = "flex";
+            const rect = btnColli.getBoundingClientRect();
+            panelColli.style.top = (rect.bottom + 8) + "px";
+            panelColli.style.left = Math.max(8, rect.left) + "px";
+            panelColli.style.height = "auto";
+            panelColli.style.maxHeight = "70vh";
+            renderPannelloProduttivita(document.getElementById("tnt-colli-panel-body"));
+        });
+
+        avviaTimerAutoRefreshColli();
+    }
+
+    let timerAutoRefreshColliAvviato = false;
+    function avviaTimerAutoRefreshColli() {
+        if (timerAutoRefreshColliAvviato) return;
+        timerAutoRefreshColliAvviato = true;
+        setInterval(() => { if (caricaImpostazioniColli().auto) aggiornaColliAutomatico(); }, 30 * 60 * 1000);
+    }
+
+    function trovaElementoTestoEsatto(testo, altezzaMax) {
+        const tutti = document.querySelectorAll("body *");
+        for (let i = 0; i < tutti.length; i++) {
+            const el = tutti[i];
+            if (el.children.length === 0 && el.textContent.trim() === testo) {
+                const rect = el.getBoundingClientRect();
+                if (rect.top >= 0 && rect.top < altezzaMax && rect.width > 0 && rect.height > 0) return el;
+            }
+        }
+        return null;
+    }
+
+    function posizionaBadgeProduttivita() {
+        const badge = document.getElementById("tnt-badge-colli");
+        const help = trovaElementoTestoEsatto("Help", 60);
+        if (!badge || !help) return;
+        if (badge.parentElement !== document.body) document.body.appendChild(badge);
+        const stile = window.getComputedStyle(help);
+        const rect = help.getBoundingClientRect();
+        badge.style.position = "fixed";
+        badge.style.top = rect.top + "px";
+        badge.style.left = (rect.right + 16) + "px";
+        badge.style.margin = "0";
+        badge.style.fontFamily = stile.fontFamily;
+        badge.style.fontSize = stile.fontSize;
+        badge.style.fontWeight = stile.fontWeight;
+        badge.style.color = stile.color;
+        badge.style.background = "transparent";
+        badge.style.border = "none";
+        badge.style.boxShadow = "none";
+        badge.style.borderRadius = "0";
+        badge.style.padding = "0";
+        badge.style.zIndex = "999999";
     }
 
     function impostaBadgeInAttesa() {
@@ -1248,6 +1540,18 @@
                 const remarksOggetto = {};
                 remarksUnite.forEach((v, k) => { remarksOggetto[k] = v; });
 
+                const colliLocali = caricaColliLocali();
+                const colliRemoti = remoto.dati.colliTotali;
+                let colliFinali = colliRemoti;
+                if (colliLocali && (!colliRemoti || new Date(colliLocali.aggiornatoIl).getTime() > new Date(colliRemoti.aggiornatoIl).getTime())) {
+                    colliFinali = colliLocali;
+                }
+                if (colliFinali) salvaColliLocali(colliFinali);
+                aggiornaVisualizzazioneColli();
+
+                const colliStoricoUnito = unisciColliStorico(remoto.dati.colliStorico, caricaColliStorico());
+                salvaColliStorico(colliStoricoUnito);
+
                 salvaStoricoReport(pulito.storico);
                 salvaSessioniScarico(pulito.sessioni);
 
@@ -1255,10 +1559,12 @@
                     && pulito.sessioni.length === remoto.dati.sessioni.length
                     && remoto.dati.presenze[DEVICE_ID] === presenzeFinali[DEVICE_ID]
                     && Object.keys(presenzeFinali).length === Object.keys(remoto.dati.presenze).length
-                    && JSON.stringify(remarksOggetto) === JSON.stringify(remoto.dati.remarksBaie || {});
+                    && JSON.stringify(remarksOggetto) === JSON.stringify(remoto.dati.remarksBaie || {})
+                    && JSON.stringify(colliFinali) === JSON.stringify(colliRemoti)
+                    && colliStoricoUnito.length === remoto.dati.colliStorico.length;
                 if (invariato) break;
 
-                const ok = await firebaseScriviFile({ versione: VERSIONE_DATI, storico: pulito.storico, sessioni: pulito.sessioni, presenze: presenzeFinali, remarksBaie: remarksOggetto }, remoto.etag);
+                const ok = await firebaseScriviFile({ versione: VERSIONE_DATI, storico: pulito.storico, sessioni: pulito.sessioni, presenze: presenzeFinali, remarksBaie: remarksOggetto, colliTotali: colliFinali || null, colliStorico: colliStoricoUnito }, remoto.etag);
                 if (ok) break;
                 await attesa(400 * (tentativo + 1) + Math.random() * 300);
             }
@@ -1481,6 +1787,14 @@
         stat.perTurno.forEach((r) => righeStat.push({ Indicatore: "% ritardo turno - " + r.chiave, Valore: r.percentuale + "%", Campioni: r.totale }));
         stat.perCliente.forEach((r) => righeStat.push({ Indicatore: "% ritardo cliente - " + r.chiave, Valore: r.percentuale + "%", Campioni: r.totale }));
 
+        const collis = statisticheColli();
+        if (collis) {
+            righeStat.push({ Indicatore: "Colli totali turno corrente (" + collis.tipoAttuale + ")", Valore: collis.attuale.valore, Campioni: "" });
+            righeStat.push({ Indicatore: "Media colli/ora turno corrente", Valore: Math.round(collis.mediaOraria), Campioni: "" });
+            if (collis.turnoPrecedente) righeStat.push({ Indicatore: "Colli turno precedente (" + collis.turnoPrecedente.tipoTurno + ")", Valore: collis.turnoPrecedente.valore, Campioni: "" });
+            if (collis.turnoStessoIeri) righeStat.push({ Indicatore: "Colli stesso turno giorno precedente", Valore: collis.turnoStessoIeri.valore, Campioni: "" });
+        }
+
         const righeStatBaia = stat.perBaia.map((r) => ({
             "Baia": r.doorNumber,
             "Lato": r.lato,
@@ -1639,9 +1953,30 @@
         return '<div class="tnt-card-delta ' + classe + '">' + segno + deltaMinuti + 'm rispetto alla media ultimi ' + giorni + ' giorni (' + mediaStoricaMinuti + 'm)</div>';
     }
 
+    function renderStatisticheColli(cont) {
+        const s = statisticheColli();
+        if (!s) { cont.innerHTML = '<div class="tnt-empty">Nessun dato colli ancora scaricato da Splunk (clicca la casella Colli in alto)</div>'; return; }
+        const oreTxt = s.oreTrascorse < 1 ? Math.round(s.oreTrascorse * 60) + ' min' : s.oreTrascorse.toFixed(1) + ' h';
+        let html = '<div class="tnt-card tnt-card-ambra">'
+            + '<div class="tnt-card-row"><div class="tnt-card-title">' + s.attuale.valore.toLocaleString("it-IT") + ' colli</div><div class="tnt-badge">' + Math.round(s.mediaOraria) + '/h</div></div>'
+            + '<div class="tnt-card-sub">Turno ' + s.tipoAttuale + ' in corso da ' + oreTxt + '</div>';
+        if (s.turnoPrecedente) {
+            const d = s.attuale.valore - s.turnoPrecedente.valore;
+            html += '<div class="tnt-card-sub">Turno precedente (' + s.turnoPrecedente.tipoTurno + '): ' + s.turnoPrecedente.valore.toLocaleString("it-IT") + ' colli (' + (d >= 0 ? "+" : "") + d.toLocaleString("it-IT") + ')</div>';
+        }
+        if (s.turnoStessoIeri && s.turnoStessoIeri !== s.turnoPrecedente) {
+            const d2 = s.attuale.valore - s.turnoStessoIeri.valore;
+            html += '<div class="tnt-card-sub">Stesso turno giorno precedente: ' + s.turnoStessoIeri.valore.toLocaleString("it-IT") + ' colli (' + (d2 >= 0 ? "+" : "") + d2.toLocaleString("it-IT") + ')</div>';
+        }
+        html += '</div>';
+        cont.innerHTML = html;
+    }
+
     function renderPannelloStatistiche(panelBody) {
         const oggi = new Date().toISOString().slice(0, 10);
         panelBody.innerHTML =
+            '<div class="tnt-group-label">Colli totali turno (da Splunk)</div>' +
+            '<div id="tnt-stat-colli"></div>' +
             '<label>Dal giorno</label>' +
             '<div class="tnt-riga-data-ora"><input type="date" id="tnt-stat-data-inizio" value="' + oggi + '">' +
             '<input type="time" id="tnt-stat-ora-inizio" value="00:00"></div>' +
@@ -1755,6 +2090,7 @@
             esegui(null, null, null, null);
         });
         esegui(oggi, "00:00", oggi, "23:59");
+        renderStatisticheColli(document.getElementById("tnt-stat-colli"));
     }
 
     function renderPannelloTempisticaParcel(panelBody) {
@@ -2146,7 +2482,7 @@
         return { divider: divider, label: label };
     }
 
-    function creaPannello(id, titolo, coloreIcona) {
+    function creaPannello(id, titolo, coloreIcona, onRefresh) {
         const panel = document.createElement("div");
         panel.id = id;
         panel.className = "tnt-panel";
@@ -2154,7 +2490,10 @@
         panel.innerHTML =
             '<div class="tnt-panel-header">' +
                 '<div class="tnt-panel-title"><span class="tnt-dot-titolo" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + coloreIcona + ';"></span>' + titolo + '</div>' +
-                '<span class="tnt-panel-close" title="Chiudi">&#10005;</span>' +
+                '<div style="display:flex;align-items:center;gap:2px;">' +
+                    (onRefresh ? '<span class="tnt-panel-refresh" title="Aggiorna">&#8635;</span>' : '') +
+                    '<span class="tnt-panel-close" title="Chiudi">&#10005;</span>' +
+                '</div>' +
             '</div>' +
             '<div class="tnt-panel-body" id="' + id + '-body"></div>';
         document.body.appendChild(panel);
@@ -2165,6 +2504,12 @@
                 posizionaPannelliGruppo(ORDINE_GRUPPO_CARICO_SCARICO);
             }
         });
+        if (onRefresh) {
+            panel.querySelector(".tnt-panel-refresh").addEventListener("click", (e) => {
+                e.stopPropagation();
+                onRefresh();
+            });
+        }
         return panel;
     }
 
@@ -2248,7 +2593,7 @@
             const btn2 = creaIconaMenu("tnt-orologio-scarico-btn", "#ffffff", disegnoScarico);
             btn2.title = "Carichi in scadenza cutoff (Scarico)";
             menu.appendChild(btn2);
-            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", COLORE_SEZIONE_SCARICO);
+            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", COLORE_SEZIONE_SCARICO, () => scansionaBaieScarico(document.getElementById("tnt-orologio-scarico-panel-body")));
             const body2 = document.getElementById("tnt-orologio-scarico-panel-body");
             collegaClick(btn2, panel2, () => scansionaBaieScarico(body2), ORDINE_GRUPPO_CARICO_SCARICO);
         }
@@ -2316,6 +2661,7 @@
             const p = document.getElementById(id);
             if (pannelloAperto(p)) posizionaPannelloSingolo(p);
         });
+        try { posizionaBadgeProduttivita(); } catch (e) {}
     }
 
     let riposizionamentoSchedulato = false;
@@ -2348,6 +2694,7 @@
         try { scanBlocchi(document.body); } catch (e) {}
         try { pulisciStoricoVecchio(); } catch (e) {}
         try { initIcone(); } catch (e) {}
+        try { posizionaBadgeProduttivita(); } catch (e) {}
         try { processaTripDetails(); } catch (e) {}
 
         let debounceTimer = null;
@@ -2357,6 +2704,7 @@
             nodiDaControllare.clear();
             try { nodi.forEach((n) => { if (document.body.contains(n)) scanBlocchi(n); }); } catch (e) {}
             try { initIcone(); } catch (e) {}
+            try { posizionaBadgeProduttivita(); } catch (e) {}
             try { processaTripDetails(); } catch (e) {}
             try { aggiornaPannelloOutbound(); } catch (e) {}
         }
