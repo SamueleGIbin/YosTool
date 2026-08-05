@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -125,6 +125,22 @@
     const cacheCutoffPerBaia = new Map();
     const cacheRemarksPerBaia = new Map();
 
+    const STORAGE_KEY_CACHE_MOVIMENTI = "tnt_cache_movimenti_per_unit_v1";
+    function caricaCacheMovimentiDaStorage() {
+        try {
+            const raw = localStorage.getItem(STORAGE_KEY_CACHE_MOVIMENTI);
+            const obj = raw ? JSON.parse(raw) : {};
+            Object.keys(obj).forEach((unitId) => cacheMovimentiPerUnit.set(unitId, obj[unitId]));
+        } catch (e) {}
+    }
+    function salvaCacheMovimentiSuStorage() {
+        try {
+            const obj = {};
+            cacheMovimentiPerUnit.forEach((v, k) => { obj[k] = v; });
+            localStorage.setItem(STORAGE_KEY_CACHE_MOVIMENTI, JSON.stringify(obj));
+        } catch (e) {}
+    }
+
     // Evita che il cutoff di un mezzo precedente (o di un pannello DOM residuo)
     // resti "incollato" alla baia quando arriva un nuovo mezzo: ogni voce di
     // cache è legata all'unitId realmente presente in quella baia in questo momento
@@ -160,6 +176,7 @@
     }
 
     function elaboreRispostaMovimenti(movimenti) {
+        const unitAggiornati = [];
         movimenti.forEach((m) => {
             if (!m || !Array.isArray(m.units)) return;
             m.units.forEach((u) => {
@@ -174,20 +191,74 @@
                     tripTourDescription: m.trip ? m.trip.tripTourDescription : "",
                     vistoIl: Date.now()
                 });
+                unitAggiornati.push(String(u.unitId));
             });
         });
+        if (unitAggiornati.length) {
+            salvaCacheMovimentiSuStorage();
+            riarricchisciStoricoConMovimenti(unitAggiornati);
+        }
+    }
+
+    function riarricchisciStoricoConMovimenti(unitIds) {
+        const setUnit = new Set(unitIds);
+        const storico = caricaStoricoReport();
+        let modificato = false;
+        storico.forEach((r) => {
+            if (!r.unitId || !setUnit.has(String(r.unitId))) return;
+            if (r.codiceOrigine !== "N/A" && r.codiceOrigine) return;
+            const mov = cacheMovimentiPerUnit.get(String(r.unitId));
+            if (!mov || !mov.origin) return;
+            function formattaOraLocale(iso) {
+                if (!iso) return "N/A";
+                const d = new Date(iso);
+                if (isNaN(d.getTime())) return "N/A";
+                return String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0") + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+            }
+            r.codiceOrigine = mov.origin || "N/A";
+            r.localita = codeMap[r.codiceOrigine] || "N/A";
+            r.viaggio = mov.movementName || "N/A";
+            if (mov.tripTourDescription) r.viaggio += " (" + mov.tripTourDescription + ")";
+            r.destinazione = mov.destination || "N/A";
+            r.arrivoSchedulato = formattaOraLocale(mov.scheduleArrival);
+            r.arrivoStimato = formattaOraLocale(mov.estimatedArrival);
+            r.arrivoReale = formattaOraLocale(mov.actualArrival);
+            const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
+            if (arrivoIso) {
+                const arrivoDate = new Date(arrivoIso);
+                const arrivoPortaReale = new Date(r.timestampIso);
+                const res = calcolaCutoffPerCodice(r.codiceOrigine, arrivoDate, !isNaN(arrivoPortaReale.getTime()) ? arrivoPortaReale : null);
+                if (res) {
+                    r.cutoffOrario = String(res.cutoffDate.getHours()).padStart(2, "0") + ":" + String(res.cutoffDate.getMinutes()).padStart(2, "0");
+                    r.cutoffTurno = res.cat.turno;
+                    r.cutoffTipo = res.cat.nome;
+                    if (res.ritardo && res.cutoffOriginale) {
+                        r.ritardoFlag = "Si";
+                        r.cutoffOriginaleTesto = String(res.cutoffOriginale.getHours()).padStart(2, "0") + ":" + String(res.cutoffOriginale.getMinutes()).padStart(2, "0");
+                    }
+                }
+            }
+            modificato = true;
+        });
+        if (modificato) {
+            salvaStoricoReport(storico);
+            pianificaSincronizzazione(5000);
+        }
     }
 
     const FINESTRA_CONSERVAZIONE_CACHE_MOVIMENTI_MS = 16 * 60 * 60 * 1000;
     function pulisciRegistriSenzaBaia() {
         const ora = Date.now();
+        let cacheMovimentiModificata = false;
         cacheMovimentiPerUnit.forEach((mov, unitId) => {
             const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
             const riferimento = arrivoIso ? new Date(arrivoIso).getTime() : mov.vistoIl;
             if (!riferimento || isNaN(riferimento) || (ora - riferimento) > FINESTRA_CONSERVAZIONE_CACHE_MOVIMENTI_MS) {
                 cacheMovimentiPerUnit.delete(unitId);
+                cacheMovimentiModificata = true;
             }
         });
+        if (cacheMovimentiModificata) salvaCacheMovimentiSuStorage();
         unitGiaScaricati.forEach((vistoIl, unitId) => {
             if (!vistoIl || (ora - vistoIl) > FINESTRA_CONSERVAZIONE_CACHE_MOVIMENTI_MS) unitGiaScaricati.delete(unitId);
         });
@@ -238,6 +309,22 @@
 
     const sessioniScaricoInCorso = new Map();
     const STORAGE_KEY_SESSIONI_SCARICO = "tnt_sessioni_scarico_v1";
+    const STORAGE_KEY_SESSIONI_IN_CORSO = "tnt_sessioni_scarico_in_corso_v1";
+
+    function caricaSessioniInCorsoDaStorage() {
+        try {
+            const raw = localStorage.getItem(STORAGE_KEY_SESSIONI_IN_CORSO);
+            const obj = raw ? JSON.parse(raw) : {};
+            Object.keys(obj).forEach((doorNumber) => sessioniScaricoInCorso.set(doorNumber, obj[doorNumber]));
+        } catch (e) {}
+    }
+    function salvaSessioniInCorsoSuStorage() {
+        try {
+            const obj = {};
+            sessioniScaricoInCorso.forEach((v, k) => { obj[k] = v; });
+            localStorage.setItem(STORAGE_KEY_SESSIONI_IN_CORSO, JSON.stringify(obj));
+        } catch (e) {}
+    }
 
     function caricaSessioniScarico() {
         try { const raw = localStorage.getItem(STORAGE_KEY_SESSIONI_SCARICO); return raw ? JSON.parse(raw) : []; } catch (e) { return []; }
@@ -253,12 +340,14 @@
         if (attuale && attuale.unitId === String(unitId)) return;
         if (attuale) chiudiSessioneScarico(doorNumber, new Date().toISOString());
         sessioniScaricoInCorso.set(doorNumber, { unitId: String(unitId), lato, inizioIso: orarioIso });
+        salvaSessioniInCorsoSuStorage();
     }
 
     function chiudiSessioneScarico(doorNumber, fineIso) {
         const attuale = sessioniScaricoInCorso.get(doorNumber);
         if (!attuale) return;
         sessioniScaricoInCorso.delete(doorNumber);
+        salvaSessioniInCorsoSuStorage();
         const inizio = new Date(attuale.inizioIso).getTime();
         const fine = new Date(fineIso).getTime();
         if (isNaN(inizio) || isNaN(fine) || fine <= inizio) return;
@@ -2456,7 +2545,12 @@
     function aggiornaPannelloScaricoSeAperto() {
         const panel = document.getElementById("tnt-orologio-scarico-panel");
         const body = document.getElementById("tnt-orologio-scarico-panel-body");
-        if (!body || !panel || panel.style.display === "none") return;
+        if (!body || !pannelloAperto(panel)) return;
+        forzaRefreshOrologioScarico(body);
+    }
+
+    async function forzaRefreshOrologioScarico(body) {
+        await pollDockingDoorsAttivo();
         scansionaBaieScarico(body);
     }
 
@@ -2593,9 +2687,9 @@
             const btn2 = creaIconaMenu("tnt-orologio-scarico-btn", "#ffffff", disegnoScarico);
             btn2.title = "Carichi in scadenza cutoff (Scarico)";
             menu.appendChild(btn2);
-            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", COLORE_SEZIONE_SCARICO, () => scansionaBaieScarico(document.getElementById("tnt-orologio-scarico-panel-body")));
+            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", COLORE_SEZIONE_SCARICO, () => forzaRefreshOrologioScarico(document.getElementById("tnt-orologio-scarico-panel-body")));
             const body2 = document.getElementById("tnt-orologio-scarico-panel-body");
-            collegaClick(btn2, panel2, () => scansionaBaieScarico(body2), ORDINE_GRUPPO_CARICO_SCARICO);
+            collegaClick(btn2, panel2, () => forzaRefreshOrologioScarico(body2), ORDINE_GRUPPO_CARICO_SCARICO);
         }
 
         if (!document.getElementById("tnt-btn-scarica-report")) {
@@ -2691,6 +2785,8 @@
     function avviaTool() {
         impostaBadgeInAttesa();
 
+        try { caricaCacheMovimentiDaStorage(); } catch (e) {}
+        try { caricaSessioniInCorsoDaStorage(); } catch (e) {}
         try { scanBlocchi(document.body); } catch (e) {}
         try { pulisciStoricoVecchio(); } catch (e) {}
         try { initIcone(); } catch (e) {}
