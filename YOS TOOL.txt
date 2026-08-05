@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      2.0
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -1373,10 +1373,49 @@
         });
     }
 
+    async function elencaJobSplunk(csrfInfo) {
+        const headers = { "X-Requested-With": "XMLHttpRequest" };
+        if (csrfInfo.valore) headers["X-Splunk-Form-Key"] = csrfInfo.valore;
+        const res = await gmRequest({
+            method: "GET",
+            url: SPLUNK_HOST + "/en-US/splunkd/__raw/services/search/jobs?output_mode=json&count=0",
+            headers: headers,
+            anonymous: false,
+            timeout: 20000
+        });
+        if (res.status < 200 || res.status >= 300) return [];
+        try {
+            const dati = JSON.parse(res.responseText);
+            return (dati.entry || []).map((e) => e.name).filter(Boolean);
+        } catch (e) { return []; }
+    }
+
+    async function eliminaJobSplunk(sid, csrfInfo) {
+        const headers = { "X-Requested-With": "XMLHttpRequest" };
+        if (csrfInfo.valore) headers["X-Splunk-Form-Key"] = csrfInfo.valore;
+        try {
+            await gmRequest({
+                method: "DELETE",
+                url: SPLUNK_HOST + "/en-US/splunkd/__raw/services/search/jobs/" + encodeURIComponent(sid),
+                headers: headers,
+                anonymous: false,
+                timeout: 15000
+            });
+        } catch (e) {}
+    }
+
+    async function pulisciJobSplunkVecchi(csrfInfo) {
+        try {
+            const sids = await elencaJobSplunk(csrfInfo);
+            for (const sid of sids) await eliminaJobSplunk(sid, csrfInfo);
+        } catch (e) {}
+    }
+
     async function recuperaColliDaSplunk() {
         const earliest = String(Math.floor(calcolaInizioDatiColli().getTime() / 1000));
         const corpo = "output_mode=json&earliest_time=" + encodeURIComponent(earliest) + "&latest_time=now&search=" + encodeURIComponent(SPLUNK_SPL);
         const csrfInfo = await ottieniCsrfSplunk();
+        await pulisciJobSplunkVecchi(csrfInfo);
         const headers = { "Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest" };
         if (csrfInfo.valore) headers["X-Splunk-Form-Key"] = csrfInfo.valore;
         const res = await gmRequest({
@@ -1411,7 +1450,18 @@
         const btnAggiorna = document.getElementById("tnt-colli-aggiorna-ora");
         if (btnAggiorna) btnAggiorna.textContent = "Aggiorno...";
         try {
-            const valore = await recuperaColliDaSplunk();
+            let valore;
+            try {
+                valore = await recuperaColliDaSplunk();
+            } catch (primoErrore) {
+                if (/quota/i.test(primoErrore.message || "")) {
+                    const csrfInfo = await ottieniCsrfSplunk();
+                    await pulisciJobSplunkVecchi(csrfInfo);
+                    valore = await recuperaColliDaSplunk();
+                } else {
+                    throw primoErrore;
+                }
+            }
             const inizioTurnoIso = calcolaInizioDatiColli().toISOString();
             archiviaColliSeTurnoCambiato(inizioTurnoIso);
             const oggetto = { valore, aggiornatoIl: new Date().toISOString(), aggiornatoDa: DEVICE_ID, inizioTurnoIso };
@@ -2000,7 +2050,7 @@
         return { perLato: mappaLato, attesaParcheggioMediaMinuti: attesaParcheggio.mediaMinuti, giorni: GIORNI_MEDIA_TREND };
     }
 
-    function calcolaRitardiPer(storico, chiaveFn) {
+    function calcolaRitardiPer(storico, chiaveFn, ordinaPer) {
         const gruppi = new Map();
         storico.forEach((r) => {
             const chiave = chiaveFn(r);
@@ -2014,7 +2064,8 @@
         gruppi.forEach((v, chiave) => {
             righe.push({ chiave, totale: v.totale, ritardati: v.ritardati, percentuale: v.totale > 0 ? Math.round((v.ritardati / v.totale) * 100) : 0 });
         });
-        righe.sort((a, b) => b.totale - a.totale);
+        if (ordinaPer === "percentuale") righe.sort((a, b) => b.percentuale - a.percentuale);
+        else righe.sort((a, b) => b.totale - a.totale);
         return righe;
     }
 
@@ -2033,7 +2084,7 @@
             perLato: calcolaTempoScaricoPerLato(dataInizioStr, oraInizioStr, dataFineStr, oraFineStr),
             perBaia: calcolaTempoScaricoPerBaia(dataInizioStr, oraInizioStr, dataFineStr, oraFineStr),
             perTurno: calcolaRitardiPer(storicoScaricoParcheggio, (r) => r.cutoffTurno),
-            perCliente: calcolaRitardiPer(storicoScaricoParcheggio, (r) => r.codiceOrigine),
+            perCliente: calcolaRitardiPer(storicoScaricoParcheggio, (r) => r.codiceOrigine, "percentuale"),
             trend: calcolaTrend(dataInizioStr)
         };
     }
@@ -2106,39 +2157,39 @@
             if (latiConDati.length === 0) {
                 html += '<div class="tnt-empty">Nessuna sessione di scarico completata nel periodo</div>';
             } else {
-                let migliore = null, peggiore = null;
-                latiConDati.forEach((r) => {
-                    if (!migliore || r.mediaMinuti < migliore.mediaMinuti) migliore = r;
-                    if (!peggiore || r.mediaMinuti > peggiore.mediaMinuti) peggiore = r;
-                });
-                stat.perLato.forEach((r) => {
-                    if (r.mediaMinuti === null) return;
-                    let colore = "tnt-card-verde";
-                    if (peggiore && r.chiave === peggiore.chiave && latiConDati.length > 1) colore = "tnt-card-rosso";
-                    else if (migliore && r.chiave === migliore.chiave && latiConDati.length > 1) colore = "tnt-card-verde";
-                    else colore = "tnt-card-ambra";
-                    let deltaLatoHtml = "";
+                const latiConDelta = latiConDati.map((r) => {
+                    let deltaMinuti = null, mediaStorica = null;
                     if (stat.trend) {
-                        const mediaStorica = stat.trend.perLato.get(r.chiave);
-                        if (mediaStorica !== null && mediaStorica !== undefined) deltaLatoHtml = rigaDeltaTrend(r.mediaMinuti - mediaStorica, stat.trend.giorni, mediaStorica);
+                        mediaStorica = stat.trend.perLato.get(r.chiave);
+                        if (mediaStorica !== null && mediaStorica !== undefined) deltaMinuti = r.mediaMinuti - mediaStorica;
+                        else mediaStorica = null;
                     }
+                    return Object.assign({}, r, { deltaMinuti, mediaStorica });
+                });
+                latiConDelta.sort((a, b) => {
+                    if (a.deltaMinuti === null && b.deltaMinuti === null) return a.mediaMinuti - b.mediaMinuti;
+                    if (a.deltaMinuti === null) return 1;
+                    if (b.deltaMinuti === null) return -1;
+                    return a.deltaMinuti - b.deltaMinuti;
+                });
+                latiConDelta.forEach((r) => {
+                    let colore = "tnt-card-ambra";
+                    if (r.deltaMinuti !== null) colore = r.deltaMinuti > 0 ? "tnt-card-rosso" : (r.deltaMinuti < 0 ? "tnt-card-verde" : "tnt-card-ambra");
+                    const deltaLatoHtml = r.deltaMinuti !== null ? rigaDeltaTrend(r.deltaMinuti, stat.trend.giorni, r.mediaStorica) : "";
                     html += '<div class="tnt-card ' + colore + '"><div class="tnt-card-row"><div class="tnt-card-title">' + r.chiave + '</div><div class="tnt-badge">' + Math.floor(r.mediaMinuti / 60) + 'h ' + (r.mediaMinuti % 60) + 'm</div></div><div class="tnt-card-sub">' + r.campioni + ' camion scaricati</div>' + deltaLatoHtml + '</div>';
                 });
             }
 
             html += '<div class="tnt-group-label">Baie più lente (dettaglio per baia)</div>';
-            const baieConDati = stat.perBaia.filter((r) => r.mediaMinuti !== null);
-            if (baieConDati.length === 0) {
-                html += '<div class="tnt-empty">Nessuna sessione di scarico completata nel periodo</div>';
+            const baieNegative = stat.perBaia.filter((r) => r.mediaMinuti !== null && r.scartoVsLato !== null && r.scartoVsLato > 0);
+            baieNegative.sort((a, b) => b.scartoVsLato - a.scartoVsLato);
+            if (baieNegative.length === 0) {
+                html += '<div class="tnt-empty">Nessuna baia sopra la media del proprio lato nel periodo</div>';
             } else {
-                baieConDati.slice(0, 10).forEach((r) => {
-                    let colore = "tnt-card-verde";
-                    if (r.scartoVsLato !== null) {
-                        if (r.scartoVsLato >= 10) colore = "tnt-card-rosso";
-                        else if (r.scartoVsLato >= 5) colore = "tnt-card-ambra";
-                    }
-                    const scartoTesto = r.scartoVsLato !== null ? ((r.scartoVsLato > 0 ? "+" : "") + r.scartoVsLato + "m vs media " + r.lato) : "";
-                    html += '<div class="tnt-card ' + colore + '"><div class="tnt-card-row"><div class="tnt-card-title">Baia ' + r.doorNumber + '</div><div class="tnt-badge">' + Math.floor(r.mediaMinuti / 60) + 'h ' + (r.mediaMinuti % 60) + 'm</div></div><div class="tnt-card-sub">' + r.campioni + ' camion scaricati' + (scartoTesto ? ' &middot; ' + scartoTesto : '') + '</div></div>';
+                baieNegative.slice(0, 10).forEach((r) => {
+                    const colore = r.scartoVsLato >= 10 ? "tnt-card-rosso" : "tnt-card-ambra";
+                    const scartoTesto = "+" + r.scartoVsLato + "m vs media " + r.lato;
+                    html += '<div class="tnt-card ' + colore + '"><div class="tnt-card-row"><div class="tnt-card-title">Baia ' + r.doorNumber + '</div><div class="tnt-badge">' + Math.floor(r.mediaMinuti / 60) + 'h ' + (r.mediaMinuti % 60) + 'm</div></div><div class="tnt-card-sub">' + r.campioni + ' camion scaricati &middot; ' + scartoTesto + '</div></div>';
                 });
             }
 
