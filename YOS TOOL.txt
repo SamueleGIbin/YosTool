@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -85,13 +85,15 @@
         const origOpen = XMLHttpRequest.prototype.open;
         const origSend = XMLHttpRequest.prototype.send;
         XMLHttpRequest.prototype.open = function (method, url) {
-            this._tntUrl = url;
+            try { this._tntUrl = url; } catch (e) {}
             return origOpen.apply(this, arguments);
         };
         XMLHttpRequest.prototype.send = function (body) {
-            this.addEventListener("load", function () {
-                try { gestisciRispostaIntercettata(this._tntUrl, this.responseText); } catch (e) {}
-            });
+            try {
+                this.addEventListener("load", function () {
+                    try { gestisciRispostaIntercettata(this._tntUrl, this.responseText); } catch (e) {}
+                });
+            } catch (e) {}
             return origSend.apply(this, arguments);
         };
     })();
@@ -100,7 +102,8 @@
         if (typeof window.fetch !== "function") return;
         const origFetch = window.fetch;
         window.fetch = function (input, init) {
-            const url = typeof input === "string" ? input : (input && input.url) || "";
+            let url = "";
+            try { url = typeof input === "string" ? input : (input && input.url) || ""; } catch (e) {}
             return origFetch.apply(this, arguments).then((response) => {
                 try {
                     response.clone().text().then((testo) => {
@@ -274,6 +277,11 @@
             }
         });
         if (modificato) salvaArriviBaia(arrivi);
+
+        const unitPresentiOraSet = new Set(Object.values(arrivi).map((v) => String(v && v.unitId)));
+        unitVerificatiCutoff.forEach((unitId) => {
+            if (!unitPresentiOraSet.has(unitId) && !cacheMovimentiPerUnit.has(unitId)) unitVerificatiCutoff.delete(unitId);
+        });
     }
 
     function calcolaCutoffDaCacheMovimenti(doorNumber) {
@@ -662,20 +670,6 @@
         return "Freight";
     }
 
-    function elencoSlotCutoffUnici() {
-        const visti = new Set();
-        const slot = [];
-        CATEGORIE.forEach((c) => {
-            const chiave = c.cutoffOre + ":" + c.cutoffMin;
-            if (!visti.has(chiave)) {
-                visti.add(chiave);
-                slot.push({ ore: c.cutoffOre, min: c.cutoffMin });
-            }
-        });
-        return slot;
-    }
-    const SLOT_CUTOFF_UNICI = elencoSlotCutoffUnici();
-
     function eOrarioDiChiusura(data) {
         const giorno = data.getDay();
         const minutiGiorno = data.getHours() * 60 + data.getMinutes();
@@ -684,19 +678,19 @@
         return false;
     }
 
-    function trovaProssimoCutoffConMargine(cutoffBase, arrivoPortaReale, margineMinimo) {
+    function trovaProssimoCutoffConMargine(cutoffBase, arrivoPortaReale, margineMinimo, slotCandidati) {
         const ancora = arrivoPortaReale && !isNaN(arrivoPortaReale.getTime()) && arrivoPortaReale.getTime() > cutoffBase.getTime() ? arrivoPortaReale : cutoffBase;
         const candidati = [];
         for (let offset = 0; offset <= 5; offset++) {
-            SLOT_CUTOFF_UNICI.forEach((slot) => {
+            slotCandidati.forEach((slot) => {
                 const d = new Date(ancora.getFullYear(), ancora.getMonth(), ancora.getDate() + offset, slot.ore, slot.min, 0, 0);
-                if (d.getTime() > cutoffBase.getTime() && !eOrarioDiChiusura(d)) candidati.push(d);
+                if (d.getTime() > cutoffBase.getTime() && !eOrarioDiChiusura(d)) candidati.push({ data: d, cat: slot.cat });
             });
         }
-        candidati.sort((a, b) => a.getTime() - b.getTime());
-        for (const d of candidati) {
-            const margine = (d.getTime() - arrivoPortaReale.getTime()) / 60000;
-            if (margine >= margineMinimo) return d;
+        candidati.sort((a, b) => a.data.getTime() - b.data.getTime());
+        for (const c of candidati) {
+            const margine = (c.data.getTime() - arrivoPortaReale.getTime()) / 60000;
+            if (margine >= margineMinimo) return c;
         }
         return candidati.length > 0 ? candidati[candidati.length - 1] : null;
     }
@@ -705,6 +699,7 @@
         const margineMinimo = margineMinimoPerCodice(codice);
         const candidati = CATEGORIE.filter((c) => c.codici.includes(codice));
         if (candidati.length === 0) return null;
+        const slotCandidati = candidati.map((cat) => ({ ore: cat.cutoffOre, min: cat.cutoffMin, cat: cat }));
         const choices = [];
         candidati.forEach((cat) => {
             for (let offset = -1; offset <= 5; offset++) {
@@ -732,11 +727,11 @@
             const margineReale = (risultato.cutoffDate.getTime() - arrivoPortaReale.getTime()) / 60000;
             if (margineReale < margineMinimo) {
                 const cutoffOriginaleGiaPassato = risultato.cutoffDate.getTime() <= arrivoPortaReale.getTime();
-                const nuovoCutoff = trovaProssimoCutoffConMargine(risultato.cutoffDate, arrivoPortaReale, margineMinimo);
+                const nuovoCutoff = trovaProssimoCutoffConMargine(risultato.cutoffDate, arrivoPortaReale, margineMinimo, slotCandidati);
                 if (nuovoCutoff) {
                     risultato = cutoffOriginaleGiaPassato
-                        ? { cat: risultato.cat, cutoffDate: nuovoCutoff, ritardo: false }
-                        : { cat: risultato.cat, cutoffDate: nuovoCutoff, cutoffOriginale: risultato.cutoffDate, ritardo: true, margineMinimo: margineMinimo };
+                        ? { cat: nuovoCutoff.cat, cutoffDate: nuovoCutoff.data, ritardo: false }
+                        : { cat: nuovoCutoff.cat, cutoffDate: nuovoCutoff.data, cutoffOriginale: risultato.cutoffDate, ritardo: true, margineMinimo: margineMinimo };
                 }
             }
         }
@@ -1444,6 +1439,7 @@
 
     let ultimoErroreColli = null;
     let aggiornamentoColliInCorso = false;
+    let primoAggiornaColliEseguito = false;
     async function aggiornaColliAutomatico() {
         if (aggiornamentoColliInCorso) return;
         aggiornamentoColliInCorso = true;
@@ -1507,7 +1503,18 @@
             + '<input type="time" id="tnt-colli-orario-manuale" value="' + imp.orarioManuale + '" ' + (imp.manuale ? "" : "disabled") + ' style="display:block;width:100%;box-sizing:border-box;margin:0 0 10px;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;">'
             + '<a href="' + costruisciUrlSplunk() + '" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8B5CF6;margin:4px 0 10px;">Apri la stessa ricerca su Splunk &#8599;</a>';
 
-        document.getElementById("tnt-colli-aggiorna-ora").addEventListener("click", (e) => { e.stopPropagation(); aggiornaColliAutomatico(); });
+        document.getElementById("tnt-colli-aggiorna-ora").addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (!primoAggiornaColliEseguito) {
+                primoAggiornaColliEseguito = true;
+                window.open(costruisciUrlSplunk(), "_blank", "noopener");
+                const btnAggiorna = document.getElementById("tnt-colli-aggiorna-ora");
+                if (btnAggiorna) btnAggiorna.textContent = "Attendo login Splunk...";
+                setTimeout(aggiornaColliAutomatico, 1500);
+                return;
+            }
+            aggiornaColliAutomatico();
+        });
         document.getElementById("tnt-colli-auto").addEventListener("change", (e) => {
             const i = caricaImpostazioniColli(); i.auto = e.target.checked; salvaImpostazioniColli(i);
         });
@@ -2631,6 +2638,15 @@
 
     async function forzaRefreshOrologioScarico(body) {
         await pollDockingDoorsAttivo();
+        const baieOccupate = trovaBaieScaricoOccupate();
+        const arriviCorrenti = caricaArriviBaia();
+        baieOccupate.forEach((baia) => {
+            const voce = arriviCorrenti[baia.doorNumber];
+            if (!voce || !voce.unitId) return;
+            cacheCutoffPerBaia.delete(baia.doorNumber);
+            unitVerificatiCutoff.delete(String(voce.unitId));
+            accodaVerificaBaia(baia.doorNumber, String(voce.unitId));
+        });
         scansionaBaieScarico(body);
     }
 
@@ -2901,30 +2917,34 @@
             return !!(n.closest && n.closest('[id^="tnt-"], .tnt-panel, .cc-menu-button'));
         }
 
-        const observer = new MutationObserver((mutations) => {
-            for (const m of mutations) {
-                if (m.type === "childList") {
-                    m.addedNodes.forEach((n) => { if (n.nodeType === 1 && !eNodoInterno(n)) nodiDaControllare.add(n); });
-                } else if (m.type === "characterData" && m.target.parentElement) {
-                    if (!eNodoInterno(m.target.parentElement)) nodiDaControllare.add(m.target.parentElement);
-                } else if (m.type === "attributes" && m.target.nodeType === 1) {
-                    if (!eNodoInterno(m.target)) nodiDaControllare.add(m.target);
+        try {
+            const observer = new MutationObserver((mutations) => {
+                for (const m of mutations) {
+                    if (m.type === "childList") {
+                        m.addedNodes.forEach((n) => { if (n.nodeType === 1 && !eNodoInterno(n)) nodiDaControllare.add(n); });
+                    } else if (m.type === "characterData" && m.target.parentElement) {
+                        if (!eNodoInterno(m.target.parentElement)) nodiDaControllare.add(m.target.parentElement);
+                    } else if (m.type === "attributes" && m.target.nodeType === 1) {
+                        if (!eNodoInterno(m.target)) nodiDaControllare.add(m.target);
+                    }
                 }
-            }
-            clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(eseguiControlliPesanti, 600);
-        });
-        observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class"] });
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(eseguiControlliPesanti, 600);
+            });
+            observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class"] });
+        } catch (e) { console.error("[YOS TOOL] Errore avvio MutationObserver:", e); }
 
-        setInterval(aggiornaPannelloOutbound, 15000);
-        setInterval(aggiornaPannelloScaricoSeAperto, 15000);
-        setInterval(pollDockingDoorsAttivo, 8000);
-        setInterval(pulisciStoricoVecchio, 60 * 60 * 1000);
-        setInterval(pulisciRegistriSenzaBaia, 10 * 60 * 1000);
-        setInterval(elaboraCodaVerificaBaie, 4000);
-        pianificaSincronizzazione(3000);
-        setInterval(sincronizzaDati, FIREBASE_SYNC.INTERVALLO_MS);
+        try {
+            setInterval(aggiornaPannelloOutbound, 15000);
+            setInterval(aggiornaPannelloScaricoSeAperto, 15000);
+            setInterval(pollDockingDoorsAttivo, 8000);
+            setInterval(pulisciStoricoVecchio, 60 * 60 * 1000);
+            setInterval(pulisciRegistriSenzaBaia, 10 * 60 * 1000);
+            setInterval(elaboraCodaVerificaBaie, 4000);
+            pianificaSincronizzazione(3000);
+            setInterval(sincronizzaDati, FIREBASE_SYNC.INTERVALLO_MS);
+        } catch (e) { console.error("[YOS TOOL] Errore avvio timer periodici:", e); }
     }
 
-    avviaTool();
+    try { avviaTool(); } catch (e) { console.error("[YOS TOOL] Errore critico in avvio:", e); }
 })();
