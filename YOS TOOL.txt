@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      2.0
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -2360,6 +2360,30 @@
         return null;
     }
 
+    function trovaWrapperBaiaScarico(doorNumber) {
+        const nodi = document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO);
+        for (const el of nodi) {
+            const span = el.querySelector("span") || el;
+            const testo = (span.textContent || "").trim();
+            if (testo !== doorNumber) continue;
+            const wrapper = el.closest('[id^="unit_"]');
+            if (wrapper) return wrapper;
+        }
+        return null;
+    }
+
+    function statoBordoBaiaScarico(doorNumber) {
+        const wrapper = trovaWrapperBaiaScarico(doorNumber);
+        if (!wrapper) return null;
+        const container = wrapper.querySelector(".container");
+        if (!container) return null;
+        const cls = " " + (container.className || "") + " ";
+        if (cls.indexOf(" inb_green_outline ") !== -1) return "verde";
+        if (cls.indexOf(" buffer-unit ") !== -1) return "buffer";
+        if (cls.indexOf(" unit_ready_outline ") !== -1) return "pronta";
+        return null;
+    }
+
     function scansionaBaieScarico(panelBody) {
         const gruppi = new Map();
         const ora = new Date();
@@ -2380,6 +2404,8 @@
         const arriviCorrenti = caricaArriviBaia();
         for (const baia of baie) {
             if (remarksEsclusiOrologio(cacheRemarksPerBaia.get(baia.doorNumber))) continue;
+            const statoBordo = statoBordoBaiaScarico(baia.doorNumber);
+            if (statoBordo === "buffer" || statoBordo === "pronta") continue;
             const voceBaia = arriviCorrenti[baia.doorNumber];
             if (categoriaBaia(baia.doorNumber) === "Parcheggio" && voceBaia && unitGiaScaricati.has(String(voceBaia.unitId))) continue;
             let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
