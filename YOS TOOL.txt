@@ -36,7 +36,7 @@
             { categoria: "IMPORT DI PRIMA", arrivo: "20:00", scadenza: "21:30", codici: "DNG-XWT-WA1-QAR-MAD-BZQ-MV9-XXJ-DFT-BCN-MXP" },
             { categoria: "CLIENTI DOM", arrivo: "21:00", scadenza: "21:45", codici: "AOS1-SATCI-AT21-RUBIX-ESSENZ-GAMESTOP-CEMBR-PJLO-COWA-HILTI-APLE-PENT-LIVA-UFAL-INCO-RUNNER-PNT1-COVD-TRAS" },
             { categoria: "FILIALI PER SUD", arrivo: "21:00", scadenza: "21:45", codici: "ISV-IOE-PRG" },
-            { categoria: "CLIENTI INT", arrivo: "22:30", scadenza: "1:00", codici: "LIVA-GEWISS-MASE-UFAL" },
+            { categoria: "CLIENTI INT", arrivo: "22:30", scadenza: "1:00", codici: "LIVA-GEWISS-MASE-UFAL-APLE-GDEC" },
             { categoria: "IMPORT PRIMA DOWNGRADATO", arrivo: "21:30", scadenza: "23:45", codici: "HNJ-DNG-DFT-BCN(ALICANTE)-DFT*-DNG*-ECL" },
             { categoria: "FILIALI PER NORD MIX ITALIA", arrivo: "22:30", scadenza: "23:45", codici: "CUF-OS3-IBU-IPO-ICM-RNV-ILJ-QVA-QAL-BEA-BRG-MZ1-GOA-IIM-Q5M-B8Y-M1S-TO1-ZD1-ECL-LUG-OSO-MIL" },
             { categoria: "FILIALI PER EXPORT", arrivo: "00:00", scadenza: "1:00", codici: "VBS-MM1-IBD-VE1-REM-BO1-QPA-VRN-TO1-MDA-PMF-OSO-B7Q-IIM" }
@@ -2309,17 +2309,36 @@
         renderStatisticheColli(document.getElementById("tnt-stat-colli"));
     }
 
+    function eCodiceInternazionale(codice) {
+        if (CODICI_INTERNAZIONALI.has(codice)) return true;
+        const base = codice.replace(/\(.*\)$/, "").replace(/\*$/, "");
+        return CODICI_INTERNAZIONALI.has(base) || CODICI_INTERNAZIONALI.has(base + "*");
+    }
+
+    function renderCodiciColorati(codici) {
+        if (!codici) return "";
+        return codici.split("-").filter(Boolean).sort((a, b) => a.localeCompare(b))
+            .map((c) => {
+                const colore = eCodiceInternazionale(c) ? "#C77DFF" : "#FF9F43";
+                return '<span style="color:' + colore + ';font-weight:600;">' + escapeHtml(c) + '</span>';
+            }).join(' <span style="opacity:.4;">&middot;</span> ');
+    }
+
     function renderPannelloTempisticaParcel(panelBody) {
         let html = '<input type="text" id="tnt-parcel-ricerca" placeholder="Cerca codice o filiale...">';
+        html += '<div class="tnt-card" style="opacity:.85;font-size:12px;">'
+            + '<span style="color:#FF9F43;font-weight:600;">&#9679; domestiche</span> &nbsp; '
+            + '<span style="color:#C77DFF;font-weight:600;">&#9679; internazionali</span>'
+            + '</div>';
         DATI_TEMPISTICA_PARCEL.forEach((turno) => {
             html += '<div class="tnt-group-label">' + turno.turno + '</div>';
             turno.gruppi.forEach((g) => {
                 html += '<div class="tnt-card tnt-parcel-riga" data-ricerca="' + escapeHtml((g.categoria + ' ' + g.codici).toLowerCase()) + '">'
                     + '<div class="tnt-card-row">'
                     + '<span class="tnt-card-title">' + escapeHtml(g.categoria) + '</span>'
-                    + '<span class="tnt-badge" style="background:#3b2c66;color:#D9C6FF;">Arrivo ' + g.arrivo + '</span>'
+                    + '<span class="tnt-badge" style="background:#3b2c66;color:#D9C6FF;">Cutoff ' + g.scadenza + '</span>'
                     + '</div>'
-                    + '<div class="tnt-card-sub">Scarico entro le ' + g.scadenza + (g.codici ? ' &middot; ' + escapeHtml(g.codici) : '') + '</div>'
+                    + '<div class="tnt-card-sub">Arrivo previsto ' + g.arrivo + (g.codici ? '<br>' + renderCodiciColorati(g.codici) : '') + '</div>'
                     + '</div>';
             });
         });
