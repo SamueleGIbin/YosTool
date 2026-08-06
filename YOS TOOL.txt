@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      2.5
+// @version      2.6
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -492,7 +492,10 @@
             const voce = codaVerificaBaie.shift();
             const arrivi = caricaArriviBaia();
             const attuale = arrivi[voce.doorNumber];
-            if (!attuale || String(attuale.unitId) !== voce.unitId) { codaInLavorazione = false; return; }
+            if (voce.registraMancante) {
+                if (attuale && attuale.unitId) { codaInLavorazione = false; return; }
+                if (eBaiaInShunter(voce.doorNumber)) { codaInLavorazione = false; return; }
+            } else if (!attuale || String(attuale.unitId) !== voce.unitId) { codaInLavorazione = false; return; }
             if (!voce.soloRemarks && (leggiCacheCutoffBaia(voce.doorNumber) || calcolaCutoffDaCacheMovimenti(voce.doorNumber))) {
                 unitVerificatiCutoff.add(voce.unitId);
                 codaInLavorazione = false;
@@ -507,6 +510,11 @@
             await new Promise((r) => setTimeout(r, 900));
             assicuraTabInbound();
             await new Promise((r) => setTimeout(r, 500));
+            try { processaTripDetails(); } catch (e) {}
+            if (voce.registraMancante) {
+                const arriviOra = caricaArriviBaia()[voce.doorNumber];
+                if (arriviOra && arriviOra.unitId) voce.unitId = String(arriviOra.unitId);
+            }
             const info = leggiCutoffBaiaCorrente();
             if (info) {
                 impostaCacheCutoffBaia(voce.doorNumber, info.cutoff, info.codice);
@@ -1093,6 +1101,37 @@
             risultati.push({ doorNumber });
         });
         return risultati;
+    }
+
+    function trovaBaieOccupateNonRegistrate() {
+        const arrivi = caricaArriviBaia();
+        const risultati = [];
+        const nodi = document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO);
+        nodi.forEach((numEl) => {
+            const span = numEl.querySelector("span");
+            const doorNumber = span ? span.textContent.trim() : numEl.textContent.trim();
+            if (!doorNumber) return;
+            const cat = categoriaBaia(doorNumber);
+            if (cat !== "Scarico" && cat !== "Parcheggio") return;
+            const wrapper = numEl.closest('[id^="unit_"]');
+            if (!wrapper) return;
+            const container = wrapper.querySelector(".container");
+            if (!container) return;
+            const cls = " " + (container.className || "") + " ";
+            if (cls.indexOf("shunter") !== -1) return;
+            if (cls.indexOf(" unit-assigned ") === -1) return;
+            const voceAttuale = arrivi[doorNumber];
+            if (voceAttuale && voceAttuale.unitId) return;
+            risultati.push(doorNumber);
+        });
+        return risultati;
+    }
+
+    function accodaBaieOccupateNonRegistrate() {
+        trovaBaieOccupateNonRegistrate().forEach((doorNumber) => {
+            if (codaVerificaBaie.some((v) => v.doorNumber === doorNumber && v.registraMancante)) return;
+            codaVerificaBaie.push({ doorNumber, unitId: null, tentativi: 0, registraMancante: true });
+        });
     }
 
     function trovaBaieFreightParziali() {
@@ -2963,6 +3002,7 @@
         setInterval(pulisciStoricoVecchio, 60 * 60 * 1000);
         setInterval(pulisciRegistriSenzaBaia, 10 * 60 * 1000);
         setInterval(elaboraCodaVerificaBaie, 4000);
+        setInterval(accodaBaieOccupateNonRegistrate, 10000);
         setInterval(accodaRiverificaRemarksSeAperto, 60000);
         pianificaSincronizzazione(3000);
         setInterval(sincronizzaDati, FIREBASE_SYNC.INTERVALLO_MS);
