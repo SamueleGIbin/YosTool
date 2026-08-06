@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.3
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -33,19 +33,19 @@
 
     const DATI_TEMPISTICA_PARCEL = [
         { turno: "PRIMO SHIFT SCARICO", gruppi: [
-            { categoria: "IMPORT DI PRIMA", arrivo: "20:00", scadenza: "21:30", codici: "DNG-XWT-WA1-QAR-MAD-BZQ-MV9" },
-            { categoria: "CLIENTI DOM", arrivo: "21:00", scadenza: "21:45", codici: "AOS1-SATCI-AT21-RUBIX-ESSENZ-GAMESTOP-CEMBR-PJLO-COWA-HILTI-APLE-PENT-LIVA-UFAL-INCO-RUNNER" },
-            { categoria: "FILIALI PER SUD", arrivo: "21:00", scadenza: "21:45", codici: "ISV-IOE" },
-            { categoria: "CLIENTI INT", arrivo: "22:30", scadenza: "1:00", codici: "LIVA-GEWISS-MASE" },
-            { categoria: "IMPORT PRIMA DOWNGRADATO", arrivo: "21:30", scadenza: "23:45", codici: "HNJ-DNG-DFT-BCN(ALICANTE)" },
-            { categoria: "FILIALI PER NORD MIX ITALIA", arrivo: "22:30", scadenza: "23:45", codici: "CUF-OS3-IBU-IPO-ICM-RNV-ILJ-QVA-QAL-BEA-BRG-MZ1-GOA-IIM-Q5M-B8Y-M1S-TO1-ZD1-ECL-LUG" },
-            { categoria: "FILIALI PER EXPORT", arrivo: "00:00", scadenza: "1:00", codici: "VBS-MM1-IBD-VE1-REM-BO1-QPA-VRN-TO1-MDA-PMF-OSO-B7Q" }
+            { categoria: "IMPORT DI PRIMA", arrivo: "20:00", scadenza: "21:30", codici: "DNG-XWT-WA1-QAR-MAD-BZQ-MV9-XXJ-DFT-BCN-MXP" },
+            { categoria: "CLIENTI DOM", arrivo: "21:00", scadenza: "21:45", codici: "AOS1-SATCI-AT21-RUBIX-ESSENZ-GAMESTOP-CEMBR-PJLO-COWA-HILTI-APLE-PENT-LIVA-UFAL-INCO-RUNNER-PNT1-COVD-TRAS" },
+            { categoria: "FILIALI PER SUD", arrivo: "21:00", scadenza: "21:45", codici: "ISV-IOE-PRG" },
+            { categoria: "CLIENTI INT", arrivo: "22:30", scadenza: "1:00", codici: "LIVA-GEWISS-MASE-UFAL" },
+            { categoria: "IMPORT PRIMA DOWNGRADATO", arrivo: "21:30", scadenza: "23:45", codici: "HNJ-DNG-DFT-BCN(ALICANTE)-DFT*-DNG*-ECL" },
+            { categoria: "FILIALI PER NORD MIX ITALIA", arrivo: "22:30", scadenza: "23:45", codici: "CUF-OS3-IBU-IPO-ICM-RNV-ILJ-QVA-QAL-BEA-BRG-MZ1-GOA-IIM-Q5M-B8Y-M1S-TO1-ZD1-ECL-LUG-OSO-MIL" },
+            { categoria: "FILIALI PER EXPORT", arrivo: "00:00", scadenza: "1:00", codici: "VBS-MM1-IBD-VE1-REM-BO1-QPA-VRN-TO1-MDA-PMF-OSO-B7Q-IIM" }
         ]},
         { turno: "SECONDO SHIFT SCARICO", gruppi: [
-            { categoria: "FILIALI DIVISIONE PER 07", arrivo: "00:00", scadenza: "04:00", codici: "BRG-IPO-MZ1-IBU-MM1-TO1-VRN-VNZ" },
-            { categoria: "IMPORT SECONDA", arrivo: "02:30", scadenza: "04:00", codici: "MV9-BCN-XWT-SKG-ATH" },
-            { categoria: "HUB 07 NORD", arrivo: "04:30", scadenza: "05:30", codici: "BO2-PD2-FC5" },
-            { categoria: "HUB EXPORT/SUD", arrivo: "08:15", scadenza: "08:50", codici: "" },
+            { categoria: "FILIALI DIVISIONE PER 07", arrivo: "00:00", scadenza: "04:00", codici: "BRG-IPO-MZ1-IBU-MM1-TO1-VRN-VNZ-TV1-VE1" },
+            { categoria: "IMPORT SECONDA", arrivo: "02:30", scadenza: "04:00", codici: "MV9-BCN-XWT-SKG-ATH-KCW-LJU" },
+            { categoria: "HUB 07 NORD", arrivo: "04:30", scadenza: "05:30", codici: "BO2-PD2-FC5-PSA-ZRO" },
+            { categoria: "HUB EXPORT/SUD", arrivo: "08:15", scadenza: "08:50", codici: "AN6-FIA-NC3-NT3-GDEC-COFR-UFAL-APLE" },
             { categoria: "IMPORT ANTICIPI E FILIALI ANTICIPI", arrivo: "08:15", scadenza: "08:50", codici: "LYS-MRS-BA5-NT3" }
         ]}
     ];
@@ -423,8 +423,17 @@
     const codaVerificaBaie = [];
     let codaInLavorazione = false;
 
+    function eBaiaInShunter(doorNumber) {
+        const wrapper = trovaElementoBaiaPerNumero(doorNumber);
+        if (!wrapper) return false;
+        const container = wrapper.querySelector(".container");
+        if (!container) return false;
+        return (" " + (container.className || "") + " ").indexOf("shunter") !== -1;
+    }
+
     function accodaVerificaBaia(doorNumber, unitId) {
         if (!doorNumber || !unitId) return;
+        if (eBaiaInShunter(doorNumber)) return;
         const chiave = String(unitId);
         if (unitVerificatiCutoff.has(chiave)) return;
         if (codaVerificaBaie.some((v) => v.unitId === chiave)) return;
@@ -2435,6 +2444,7 @@
         const container = wrapper.querySelector(".container");
         if (!container) return null;
         const cls = " " + (container.className || "") + " ";
+        if (cls.indexOf("shunter") !== -1) return "shunter";
         if (cls.indexOf(" inb_green_outline ") !== -1) return "verde";
         if (cls.indexOf(" unit_ready_outline ") !== -1) return "pronta";
         if (cls.indexOf(" unit-assigned ") === -1) return "non_attiva";
@@ -2462,7 +2472,7 @@
         for (const baia of baie) {
             if (remarksEsclusiOrologio(cacheRemarksPerBaia.get(baia.doorNumber))) continue;
             const statoBordo = statoBordoBaiaScarico(baia.doorNumber);
-            if (statoBordo === "pronta" || statoBordo === "non_attiva") continue;
+            if (statoBordo === "pronta" || statoBordo === "non_attiva" || statoBordo === "shunter") continue;
             const voceBaia = arriviCorrenti[baia.doorNumber];
             if (categoriaBaia(baia.doorNumber) === "Parcheggio" && voceBaia && unitGiaScaricati.has(String(voceBaia.unitId))) continue;
             let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
