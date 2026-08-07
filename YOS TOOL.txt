@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      2.8
+// @version      2.9
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -2785,6 +2785,11 @@ function eParcheggioScarico(door) {
         scansionaBaieScarico(body);
     }
 
+    async function forzaRefreshOrologioScaricoManuale(body) {
+        await forzaRefreshOrologioScarico(body);
+        accodaBaieOccupateNonRegistrate();
+    }
+
     function creaIconaMenu(id, coloreSfondo, disegnoSvg) {
         const iconaSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 46" width="46" height="46"><rect x="0" y="0" width="46" height="46" rx="10" fill="' + coloreSfondo + '"/>' + disegnoSvg + '</svg>';
         const btn = document.createElement("img");
@@ -2928,9 +2933,9 @@ function eParcheggioScarico(door) {
             const btn2 = creaIconaMenu("tnt-orologio-scarico-btn", "#ffffff", disegnoScarico);
             btn2.title = "Carichi in scadenza cutoff (Scarico)";
             menu.appendChild(btn2);
-            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", COLORE_SEZIONE_SCARICO, () => forzaRefreshOrologioScarico(document.getElementById("tnt-orologio-scarico-panel-body")));
+            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", COLORE_SEZIONE_SCARICO, () => forzaRefreshOrologioScaricoManuale(document.getElementById("tnt-orologio-scarico-panel-body")));
             const body2 = document.getElementById("tnt-orologio-scarico-panel-body");
-            collegaClick(btn2, panel2, () => forzaRefreshOrologioScarico(body2), ORDINE_GRUPPO_CARICO_SCARICO);
+            collegaClick(btn2, panel2, () => forzaRefreshOrologioScaricoManuale(body2), ORDINE_GRUPPO_CARICO_SCARICO);
         }
 
         if (!document.getElementById("tnt-btn-scarica-report")) {
