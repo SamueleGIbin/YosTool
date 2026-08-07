@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      2.7
+// @version      2.8
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -725,7 +725,12 @@
     function margineMinimoPerCodice(codice) {
         return CODICI_INTERNAZIONALI.has(codice) ? MARGINE_MINIMO_INTERNAZIONALE_MINUTI : MARGINE_MINIMO_DOMESTICO_MINUTI;
     }
-
+function eParcheggioScarico(door) {
+    if (!/^P/i.test(door)) return false;
+    const n = parseInt(String(door).replace(/^P/i, ""), 10);
+    if (isNaN(n)) return false;
+    return (n >= 180 && n <= 192) || (n >= 283 && n <= 295);
+}
     function categoriaBaia(door) {
         if (/^P/i.test(door)) return "Parcheggio";
         const n = parseInt(door, 10);
@@ -2635,7 +2640,7 @@
         Object.keys(arrivi).forEach((doorNumber) => {
             const voce = arrivi[doorNumber];
             if (!voce || !voce.unitId) return;
-            if (categoriaBaia(doorNumber) !== "Parcheggio") return;
+            if (!eParcheggioScarico(doorNumber)) return;
             if (unitGiaScaricati.has(String(voce.unitId))) return;
             risultati.push(doorNumber);
         });
