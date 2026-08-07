@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      2.7
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -44,7 +44,7 @@
         { turno: "SECONDO SHIFT SCARICO", gruppi: [
             { categoria: "FILIALI DIVISIONE PER 07", arrivo: "00:00", scadenza: "04:00", codici: "BRG-IPO-MZ1-IBU-MM1-TO1-VRN-VNZ-TV1-VE1" },
             { categoria: "IMPORT SECONDA", arrivo: "02:30", scadenza: "04:00", codici: "MV9-BCN-XWT-SKG-ATH-KCW-LJU" },
-            { categoria: "HUB 07 NORD", arrivo: "04:30", scadenza: "05:30", codici: "BO2-PD2-FC5-PSA-ZRO" },
+            { categoria: "HUB 07 NORD", arrivo: "04:30", scadenza: "05:30", codici: "BO2-PD2-FC5-PSA-ZRO-LJU" },
             { categoria: "HUB EXPORT/SUD", arrivo: "08:15", scadenza: "08:50", codici: "AN6-FIA-NC3-NT3-GDEC-COFR-UFAL-APLE" },
             { categoria: "IMPORT ANTICIPI E FILIALI ANTICIPI", arrivo: "08:15", scadenza: "08:50", codici: "LYS-MRS-BA5-NT3" }
         ]}
@@ -426,9 +426,7 @@
     function eBaiaInShunter(doorNumber) {
         const wrapper = trovaElementoBaiaPerNumero(doorNumber);
         if (!wrapper) return false;
-        const container = wrapper.querySelector(".container");
-        if (!container) return false;
-        return (" " + (container.className || "") + " ").indexOf("shunter") !== -1;
+        return !!wrapper.querySelector('[class*="shunter"]');
     }
 
     const remarksUltimaVerifica = new Map();
@@ -1115,10 +1113,10 @@
             if (cat !== "Scarico" && cat !== "Parcheggio") return;
             const wrapper = numEl.closest('[id^="unit_"]');
             if (!wrapper) return;
+            if (wrapper.querySelector('[class*="shunter"]')) return;
             const container = wrapper.querySelector(".container");
             if (!container) return;
             const cls = " " + (container.className || "") + " ";
-            if (cls.indexOf("shunter") !== -1) return;
             if (cls.indexOf(" unit-assigned ") === -1) return;
             const voceAttuale = arrivi[doorNumber];
             if (voceAttuale && voceAttuale.unitId) return;
@@ -2345,8 +2343,9 @@
         html += '<div class="tnt-group-label">Tabella DEST &rarr; localit&agrave;</div>';
         html += '<div id="tnt-parcel-dest-lista">';
         TABELLA_DEST_PARCEL.forEach((d) => {
+            const colore = eCodiceInternazionale(d[0]) ? "#C77DFF" : "#FF9F43";
             html += '<div class="tnt-dest-row tnt-parcel-riga" data-ricerca="' + escapeHtml((d[0] + ' ' + d[1]).toLowerCase()) + '">'
-                + '<span class="tnt-dest-codice">' + escapeHtml(d[0]) + '</span>'
+                + '<span class="tnt-dest-codice" style="color:' + colore + ';font-weight:600;">' + escapeHtml(d[0]) + '</span>'
                 + '<span class="tnt-dest-nome">' + escapeHtml(d[1]) + '</span>'
                 + '</div>';
         });
@@ -2521,10 +2520,10 @@
     function statoBordoBaiaScarico(doorNumber) {
         const wrapper = trovaWrapperBaiaScarico(doorNumber);
         if (!wrapper) return null;
+        if (wrapper.querySelector('[class*="shunter"]')) return "shunter";
         const container = wrapper.querySelector(".container");
         if (!container) return null;
         const cls = " " + (container.className || "") + " ";
-        if (cls.indexOf("shunter") !== -1) return "shunter";
         if (cls.indexOf(" inb_green_outline ") !== -1) return "verde";
         if (cls.indexOf(" unit_ready_outline ") !== -1) return "pronta";
         if (cls.indexOf(" unit-assigned ") === -1) return "non_attiva";
@@ -2733,6 +2732,29 @@
         scansionaBaieScarico(body);
     }
 
+    let tntMenuContainer = null;
+
+    function ottieniContenitoreMenu() {
+        if (tntMenuContainer && document.body.contains(tntMenuContainer)) return tntMenuContainer;
+        const nativo = document.querySelector(".cc-hub-menu-panel");
+        if (!nativo) return null;
+        tntMenuContainer = document.createElement("div");
+        tntMenuContainer.id = "tnt-menu-container";
+        tntMenuContainer.style.cssText = "position:fixed;z-index:99997;display:flex;flex-direction:column;align-items:center;";
+        document.body.appendChild(tntMenuContainer);
+        sincronizzaPosizioneMenu();
+        return tntMenuContainer;
+    }
+
+    function sincronizzaPosizioneMenu() {
+        if (!tntMenuContainer) return;
+        const nativo = document.querySelector(".cc-hub-menu-panel");
+        if (!nativo) return;
+        const rect = nativo.getBoundingClientRect();
+        tntMenuContainer.style.top = rect.top + "px";
+        tntMenuContainer.style.left = rect.left + "px";
+    }
+
     function creaIconaMenu(id, coloreSfondo, disegnoSvg) {
         const iconaSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 46" width="46" height="46"><rect x="0" y="0" width="46" height="46" rx="10" fill="' + coloreSfondo + '"/>' + disegnoSvg + '</svg>';
         const btn = document.createElement("img");
@@ -2814,7 +2836,7 @@
     const ORDINE_GRUPPO_CARICO_SCARICO = ["tnt-orologio-panel", "tnt-orologio-scarico-panel"];
 
     function posizionaPannelliGruppo(ordineIds) {
-        const menu = document.querySelector(".cc-hub-menu-panel");
+        const menu = tntMenuContainer || document.querySelector(".cc-hub-menu-panel");
         if (!menu) return;
         const rectMenu = menu.getBoundingClientRect();
         const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
@@ -2830,7 +2852,7 @@
     }
 
     function posizionaPannelloSingolo(panel) {
-        const menu = document.querySelector(".cc-hub-menu-panel");
+        const menu = tntMenuContainer || document.querySelector(".cc-hub-menu-panel");
         const rectMenu = menu ? menu.getBoundingClientRect() : panel.getBoundingClientRect();
         const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
         panel.style.top = rectMenu.top + "px";
@@ -2862,7 +2884,7 @@
     const COLORE_SEZIONE_CARICO = "#FF7A00";
 
     function initIcone() {
-        const menu = document.querySelector(".cc-hub-menu-panel");
+        const menu = ottieniContenitoreMenu();
         if (!menu) return;
 
         if (!document.getElementById("cc-menu-label-scarico")) {
@@ -3022,6 +3044,7 @@
         setInterval(pulisciRegistriSenzaBaia, 10 * 60 * 1000);
         setInterval(elaboraCodaVerificaBaie, 4000);
         setInterval(accodaBaieOccupateNonRegistrate, 10000);
+        setInterval(sincronizzaPosizioneMenu, 2000);
         setInterval(accodaRiverificaRemarksSeAperto, 60000);
         pianificaSincronizzazione(3000);
         setInterval(sincronizzaDati, FIREBASE_SYNC.INTERVALLO_MS);
