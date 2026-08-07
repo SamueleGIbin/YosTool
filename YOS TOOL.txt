@@ -576,7 +576,7 @@
         { nome: "Clienti International", turno: "Primo Shift", cutoffOre: 1, cutoffMin: 0, codici: ["LIVA", "GEWI", "MASE", "APLE", "UFAL", "GDEC"] },
         { nome: "Filiali Divisione per 07", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["BRG", "IPO", "MZ1", "IBU", "TO1", "MM1", "VRN", "VNZ", "TV1", "VE1"] },
         { nome: "Import Seconda", turno: "Secondo Shift", cutoffOre: 4, cutoffMin: 0, codici: ["MV9", "BCN", "SKG", "XWT", "ATH", "KCW"] },
-        { nome: "Hub 07 Nord", turno: "Secondo Shift", cutoffOre: 5, cutoffMin: 30, codici: ["BO2", "PD2", "FC5", "PSA", "ZRO","PSR"] },
+        { nome: "Hub 07 Nord", turno: "Secondo Shift", cutoffOre: 5, cutoffMin: 30, codici: ["BO2", "PD2", "FC5", "PSA", "ZRO","PSR", "LJU"] },
         { nome: "Hub Export/Sud", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["AN6", "FIA", "NC3", "NT3", "GDEC", "COFR", "UFAL", "APLE"] },
         { nome: "Import Anticipi", turno: "Secondo Shift", cutoffOre: 8, cutoffMin: 50, codici: ["LYS", "MRS", "NT3", "BA5"] }
     ];
@@ -2280,7 +2280,8 @@
             } else {
                 stat.perCliente.slice(0, 20).forEach((r) => {
                     const colore = r.percentuale >= 30 ? "tnt-card-rosso" : (r.percentuale >= 10 ? "tnt-card-ambra" : "tnt-card-verde");
-                    html += '<div class="tnt-card ' + colore + '"><div class="tnt-card-row"><div class="tnt-card-title">' + escapeHtml(r.chiave) + '</div><div class="tnt-badge">' + r.percentuale + '%</div></div><div class="tnt-card-sub">' + r.ritardati + ' su ' + r.totale + ' camion in ritardo</div></div>';
+                    const coloreCodice = eCodiceInternazionale(r.chiave) ? "#C77DFF" : "#FF9F43";
+                    html += '<div class="tnt-card ' + colore + '"><div class="tnt-card-row"><div class="tnt-card-title" style="color:' + coloreCodice + ';font-weight:600;">' + escapeHtml(r.chiave) + '</div><div class="tnt-badge">' + r.percentuale + '%</div></div><div class="tnt-card-sub">' + r.ritardati + ' su ' + r.totale + ' camion in ritardo</div></div>';
                 });
             }
 
@@ -2511,6 +2512,15 @@
             const span = el.querySelector("span") || el;
             const testo = (span.textContent || "").trim();
             if (testo !== doorNumber) continue;
+            if (el.offsetParent === null) continue;
+            const wrapper = el.closest('[id^="unit_"]');
+            if (wrapper && wrapper.querySelector('[class*="shunter"]')) return wrapper;
+        }
+        for (const el of nodi) {
+            const span = el.querySelector("span") || el;
+            const testo = (span.textContent || "").trim();
+            if (testo !== doorNumber) continue;
+            if (el.offsetParent === null) continue;
             const wrapper = el.closest('[id^="unit_"]');
             if (wrapper) return wrapper;
         }
@@ -2732,29 +2742,6 @@
         scansionaBaieScarico(body);
     }
 
-    let tntMenuContainer = null;
-
-    function ottieniContenitoreMenu() {
-        if (tntMenuContainer && document.body.contains(tntMenuContainer)) return tntMenuContainer;
-        const nativo = document.querySelector(".cc-hub-menu-panel");
-        if (!nativo) return null;
-        tntMenuContainer = document.createElement("div");
-        tntMenuContainer.id = "tnt-menu-container";
-        tntMenuContainer.style.cssText = "position:fixed;z-index:99997;display:flex;flex-direction:column;align-items:center;";
-        document.body.appendChild(tntMenuContainer);
-        sincronizzaPosizioneMenu();
-        return tntMenuContainer;
-    }
-
-    function sincronizzaPosizioneMenu() {
-        if (!tntMenuContainer) return;
-        const nativo = document.querySelector(".cc-hub-menu-panel");
-        if (!nativo) return;
-        const rect = nativo.getBoundingClientRect();
-        tntMenuContainer.style.top = rect.top + "px";
-        tntMenuContainer.style.left = rect.left + "px";
-    }
-
     function creaIconaMenu(id, coloreSfondo, disegnoSvg) {
         const iconaSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 46" width="46" height="46"><rect x="0" y="0" width="46" height="46" rx="10" fill="' + coloreSfondo + '"/>' + disegnoSvg + '</svg>';
         const btn = document.createElement("img");
@@ -2836,7 +2823,7 @@
     const ORDINE_GRUPPO_CARICO_SCARICO = ["tnt-orologio-panel", "tnt-orologio-scarico-panel"];
 
     function posizionaPannelliGruppo(ordineIds) {
-        const menu = tntMenuContainer || document.querySelector(".cc-hub-menu-panel");
+        const menu = document.querySelector(".cc-hub-menu-panel");
         if (!menu) return;
         const rectMenu = menu.getBoundingClientRect();
         const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
@@ -2852,7 +2839,7 @@
     }
 
     function posizionaPannelloSingolo(panel) {
-        const menu = tntMenuContainer || document.querySelector(".cc-hub-menu-panel");
+        const menu = document.querySelector(".cc-hub-menu-panel");
         const rectMenu = menu ? menu.getBoundingClientRect() : panel.getBoundingClientRect();
         const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
         panel.style.top = rectMenu.top + "px";
@@ -2884,7 +2871,7 @@
     const COLORE_SEZIONE_CARICO = "#FF7A00";
 
     function initIcone() {
-        const menu = ottieniContenitoreMenu();
+        const menu = document.querySelector(".cc-hub-menu-panel");
         if (!menu) return;
 
         if (!document.getElementById("cc-menu-label-scarico")) {
@@ -3044,7 +3031,6 @@
         setInterval(pulisciRegistriSenzaBaia, 10 * 60 * 1000);
         setInterval(elaboraCodaVerificaBaie, 4000);
         setInterval(accodaBaieOccupateNonRegistrate, 10000);
-        setInterval(sincronizzaPosizioneMenu, 2000);
         setInterval(accodaRiverificaRemarksSeAperto, 60000);
         pianificaSincronizzazione(3000);
         setInterval(sincronizzaDati, FIREBASE_SYNC.INTERVALLO_MS);
