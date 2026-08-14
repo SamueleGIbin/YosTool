@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.1
-// @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni
+// @version      3.2
+// @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
+// @match        https://forms.cloud.microsoft/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_cookie
 // @connect      yostool-default-rtdb.firebaseio.com
@@ -18,6 +19,193 @@
 
 (function () {
     'use strict';
+
+    // ── Blocco Bad Loading: auto-compila il form Microsoft ─────────────────
+    if (location.hostname === "forms.cloud.microsoft") {
+        const BL_FIREBASE_PATH = "https://yostool-default-rtdb.firebaseio.com/badloading/pending.json";
+        const BL_WEB_API_KEY   = "AIzaSyAjl7ZVqQqIh6rAhMyPLRNMz5ouSvO5hts";
+
+        async function blOtteniToken() {
+            try {
+                const raw = localStorage.getItem("yosToolFirebaseAuth");
+                const auth = raw ? JSON.parse(raw) : null;
+                if (auth && auth.idToken && auth.scadenza > Date.now() + 60000) return auth.idToken;
+                const res = await fetch("https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=" + BL_WEB_API_KEY, {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ returnSecureToken: true })
+                });
+                const d = await res.json();
+                const a = { idToken: d.idToken, refreshToken: d.refreshToken, scadenza: Date.now() + Number(d.expiresIn) * 1000 };
+                try { localStorage.setItem("yosToolFirebaseAuth", JSON.stringify(a)); } catch(_) {}
+                return a.idToken;
+            } catch(e) { return null; }
+        }
+
+        async function blLeggiDati() {
+            try {
+                const token = await blOtteniToken();
+                const url = token ? BL_FIREBASE_PATH + "?auth=" + token : BL_FIREBASE_PATH;
+                const res = await fetch(url);
+                if (!res.ok) return null;
+                return await res.json();
+            } catch(e) { return null; }
+        }
+
+        async function blCancellaDati(token) {
+            try {
+                const url = token ? BL_FIREBASE_PATH + "?auth=" + token : BL_FIREBASE_PATH;
+                await fetch(url, { method: "DELETE" });
+            } catch(e) {}
+        }
+
+        function blAttendi(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+        async function blTrovaECompila(selector, valore, tipoInput) {
+            for (let i = 0; i < 30; i++) {
+                const el = document.querySelector(selector);
+                if (el) {
+                    el.focus();
+                    if (tipoInput === "radio") {
+                        // radio: cerca il label che contiene il testo
+                        const labels = document.querySelectorAll('span[class*="text"], div[role="radio"] span');
+                        for (const lbl of labels) {
+                            if (lbl.textContent.trim() === valore) {
+                                lbl.closest('[role="radio"]')?.click();
+                                return true;
+                            }
+                        }
+                    } else if (tipoInput === "dropdown") {
+                        el.click();
+                        await blAttendi(600);
+                        const opzioni = document.querySelectorAll('div[role="option"], li[role="option"]');
+                        for (const op of opzioni) {
+                            if (op.textContent.trim() === valore) { op.click(); return true; }
+                        }
+                    } else {
+                        // text / date
+                        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                        nativeInputValueSetter.call(el, valore);
+                        el.dispatchEvent(new Event("input", { bubbles: true }));
+                        el.dispatchEvent(new Event("change", { bubbles: true }));
+                        return true;
+                    }
+                }
+                await blAttendi(400);
+            }
+            return false;
+        }
+
+        async function blAutocompila(dati) {
+            // attende che il form sia caricato
+            for (let i = 0; i < 40; i++) {
+                if (document.querySelector('div[data-automation-id="questionItem"]')) break;
+                await blAttendi(500);
+            }
+            await blAttendi(800);
+
+            const domande = () => document.querySelectorAll('div[data-automation-id="questionItem"]');
+
+            // Campo 1: HUB segnalatore (dropdown)
+            await blAttendi(500);
+            let qs = domande();
+            if (qs[0]) {
+                const btn = qs[0].querySelector('button, [role="combobox"]');
+                if (btn) { btn.click(); await blAttendi(700); }
+                const opzioni = document.querySelectorAll('div[role="option"], li[role="option"]');
+                for (const op of opzioni) { if (op.textContent.trim() === "IMR") { op.click(); break; } }
+                await blAttendi(600);
+            }
+
+            // Campo 2: Data operativa (text input)
+            qs = domande();
+            if (qs[1]) {
+                const inp = qs[1].querySelector('input[type="text"], input[type="date"]');
+                if (inp) {
+                    inp.focus();
+                    const niv = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                    niv.call(inp, dati.dataOp);
+                    inp.dispatchEvent(new Event("input", { bubbles: true }));
+                    inp.dispatchEvent(new Event("change", { bubbles: true }));
+                }
+                await blAttendi(600);
+            }
+
+            // Campo 3: Movement Type Code (radio: ITD o ERN)
+            qs = domande();
+            if (qs[2]) {
+                const radios = qs[2].querySelectorAll('[role="radio"]');
+                for (const r of radios) {
+                    if (r.textContent.trim() === dati.tipo) { r.click(); break; }
+                }
+                await blAttendi(700);
+            }
+
+            // Campo 4: Origine ITD/ERN (dropdown — appare solo dopo campo 3)
+            for (let t = 0; t < 20; t++) {
+                qs = domande();
+                if (qs.length >= 4) break;
+                await blAttendi(400);
+            }
+            qs = domande();
+            if (qs[3]) {
+                const btn = qs[3].querySelector('button, [role="combobox"]');
+                if (btn) { btn.click(); await blAttendi(700); }
+                const opzioni = document.querySelectorAll('div[role="option"], li[role="option"]');
+                for (const op of opzioni) { if (op.textContent.trim() === dati.origine) { op.click(); break; } }
+                await blAttendi(600);
+            }
+
+            // Campo 5: Targa trailer (text)
+            for (let t = 0; t < 20; t++) {
+                qs = domande();
+                if (qs.length >= 5) break;
+                await blAttendi(400);
+            }
+            qs = domande();
+            if (qs[4]) {
+                const inp = qs[4].querySelector('input[type="text"]');
+                if (inp) {
+                    inp.focus();
+                    const niv = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                    niv.call(inp, dati.targa);
+                    inp.dispatchEvent(new Event("input", { bubbles: true }));
+                    inp.dispatchEvent(new Event("change", { bubbles: true }));
+                }
+                await blAttendi(500);
+            }
+
+            // Campo 6: Movement ID (text)
+            for (let t = 0; t < 20; t++) {
+                qs = domande();
+                if (qs.length >= 6) break;
+                await blAttendi(400);
+            }
+            qs = domande();
+            if (qs[5]) {
+                const inp = qs[5].querySelector('input[type="text"]');
+                if (inp) {
+                    inp.focus();
+                    const niv = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                    niv.call(inp, dati.movementId);
+                    inp.dispatchEvent(new Event("input", { bubbles: true }));
+                    inp.dispatchEvent(new Event("change", { bubbles: true }));
+                }
+            }
+
+            // Cancella i dati Firebase dopo compilazione
+            const token = await blOtteniToken();
+            await blCancellaDati(token);
+        }
+
+        // Controlla se ci sono dati pending da compilare
+        (async () => {
+            const dati = await blLeggiDati();
+            if (dati && dati.tipo) await blAutocompila(dati);
+        })();
+
+        return; // non esegue il resto dello script YOS su forms.cloud.microsoft
+    }
+
     if (location.hostname !== "yos.apps.tnt.com") return;
 
     const FIREBASE_SYNC = {
@@ -2522,23 +2710,18 @@ function eParcheggioScarico(door) {
             }
             return "";
         })();
-        const localitaOrigineBL = codeMap[codiceOrigineBL] || codiceOrigineBL;
         const FORM_URL_BL = "https://forms.cloud.microsoft/Pages/ResponsePage.aspx?id=E8hFuebc-EGEV1oSwv4Vv4iwGjg0LMJOoEk7v5wD2Z1URVcwOUlPODUzMk1EMVI5OEJZU1BGRU0xUyQlQCN0PWcu";
         function apriPopupBadLoading() {
-            const oggi = new Date();
-            const dataOp = String(oggi.getDate()).padStart(2, "0") + "/" + String(oggi.getMonth() + 1).padStart(2, "0") + "/" + oggi.getFullYear();
             const overlay = document.createElement("div");
             overlay.id = "tnt-bl-overlay";
             overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.65);z-index:999999;display:flex;align-items:center;justify-content:center;font-family:Roboto,sans-serif;";
             const box = document.createElement("div");
             box.style.cssText = "background:#1c1c1e;border-radius:12px;padding:22px 26px;width:340px;box-shadow:0 8px 32px rgba(0,0,0,0.7);border:1px solid #3a3a3c;";
             const campi = [
-                { n: "1. HUB segnalatore", v: "IMR" },
-                { n: "2. Data operativa", v: dataOp },
-                { n: "3. Movement Type Code", v: tipoViaggioBL },
-                { n: "4. Origine " + tipoViaggioBL, v: codiceOrigineBL + " \u2014 " + localitaOrigineBL },
-                { n: "5. Targa trailer", v: unitTestoBL || "\u2014" },
-                { n: "6. Movement ID", v: schedTripBL || "\u2014" },
+                { n: "Movement Type Code", v: tipoViaggioBL },
+                { n: "Origine " + tipoViaggioBL, v: codiceOrigineBL },
+                { n: "Targa trailer", v: unitTestoBL || "\u2014" },
+                { n: "Movement ID", v: schedTripBL || "\u2014" },
             ];
             let html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">'
                 + '<span style="color:#E24B4A;font-weight:700;font-size:15px;">\u26A0 Bad Loading</span>'
@@ -2560,7 +2743,17 @@ function eParcheggioScarico(door) {
             document.body.appendChild(overlay);
             overlay.addEventListener("click", function(e) { if (e.target === overlay) overlay.remove(); });
             box.querySelector("#tnt-bl-close").addEventListener("click", function() { overlay.remove(); });
-            box.querySelector("#tnt-bl-apri").addEventListener("click", function() { window.open(FORM_URL_BL, "_blank"); });
+            box.querySelector("#tnt-bl-apri").addEventListener("click", async function() {
+                const oggi2 = new Date();
+                const dataOpBL = String(oggi2.getDate()).padStart(2, "0") + "/" + String(oggi2.getMonth() + 1).padStart(2, "0") + "/" + oggi2.getFullYear();
+                const payload = { tipo: tipoViaggioBL, origine: codiceOrigineBL, targa: unitTestoBL || "", movementId: schedTripBL || "", dataOp: dataOpBL, ts: Date.now() };
+                try {
+                    const token = await otteniIdTokenValido();
+                    const url = FIREBASE_SYNC.BASE_URL + "/badloading/pending.json?auth=" + token;
+                    await fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+                } catch(e) {}
+                window.open(FORM_URL_BL, "_blank");
+            });
             box.querySelectorAll("[data-copy]").forEach(function(btn) {
                 btn.addEventListener("click", function(e) {
                     e.stopPropagation();
