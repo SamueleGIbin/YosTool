@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      2.9
+// @version      3.0
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -66,6 +66,7 @@
 
     const urlDockingDoorsViste = new Set();
     const urlParkingBayViste = new Set();
+    const urlMovimentiViste = new Set();
 
     function gestisciRispostaIntercettata(url, testoBody) {
         const urlStr = String(url || "");
@@ -83,7 +84,11 @@
         } catch (e) {}
         try {
             const dati = JSON.parse(testoBody);
-            if (sembraListaMovimenti(dati)) elaboreRispostaMovimenti(dati);
+            if (sembraListaMovimenti(dati)) {
+                if (!urlMovimentiViste.has(urlStr)) console.log("[TNT] nuova URL movements catturata:", urlStr);
+                urlMovimentiViste.add(urlStr);
+                elaboreRispostaMovimenti(dati);
+            }
         } catch (e) {}
     }
 
@@ -118,12 +123,19 @@
         };
     })();
 
+    const _pollCooldown = new Map();
+    const POLL_COOLDOWN_MS = 7000;
+
     async function pollDockingDoorsAttivo() {
-        const urls = [...urlDockingDoorsViste, ...urlParkingBayViste];
+        const ora = Date.now();
+        const urls = [...urlDockingDoorsViste, ...urlParkingBayViste, ...urlMovimentiViste];
         if (urls.length === 0) return;
         await Promise.all(urls.map(async (url) => {
+            const ultimoOk = _pollCooldown.get(url) || 0;
+            if (ora - ultimoOk < POLL_COOLDOWN_MS) return;
             try {
                 const risp = await fetch(url, { credentials: "include", cache: "no-store" });
+                if (risp.ok) _pollCooldown.set(url, Date.now());
                 const testo = await risp.text();
                 gestisciRispostaIntercettata(url, testo);
             } catch (e) {}
@@ -204,6 +216,7 @@
             });
         });
         if (unitAggiornati.length) {
+            console.log("[TNT] movements: unita aggiornate in cache:", unitAggiornati.length);
             salvaCacheMovimentiSuStorage();
             riarricchisciStoricoConMovimenti(unitAggiornati);
         }
@@ -1155,10 +1168,9 @@ function eParcheggioScarico(door) {
             const wrapper = numEl.closest('[id^="unit_"]');
             if (!wrapper) return;
             if (wrapper.querySelector('[class*="shunter"]')) return;
-            const container = wrapper.querySelector(".container");
-            if (!container) return;
-            const cls = " " + (container.className || "") + " ";
-            if (cls.indexOf(" unit-assigned ") === -1) return;
+            const targaEl = wrapper.querySelector('[id^="unitname_"]');
+            const targa = targaEl ? targaEl.textContent.trim() : "";
+            if (!targa) return;
             const voceAttuale = arrivi[doorNumber];
             if (voceAttuale && voceAttuale.unitId) return;
             risultati.push(doorNumber);
@@ -2624,6 +2636,23 @@ function eParcheggioScarico(door) {
         renderPannelloScaricoConteggi(panelBody, gruppi, finestra);
     }
 
+    function elencoParcheggioVerdiLiberiDaDOM() {
+        const risultati = [];
+        document.querySelectorAll('[id^="parking_area_"]').forEach((areaEl) => {
+            const cls = " " + (areaEl.className || "") + " ";
+            if (cls.indexOf(" inb_green_outline ") === -1) return;
+            if (cls.indexOf(" unit-assigned ") !== -1) return;
+            const wrapper = areaEl.closest('[id^="parking_"]');
+            if (!wrapper) return;
+            const numDiv = wrapper.querySelector('[id^="parking_number_"]');
+            if (!numDiv) return;
+            const span = numDiv.querySelector("span");
+            const nome = span ? span.textContent.trim() : numDiv.textContent.trim();
+            if (nome) risultati.push(nome);
+        });
+        return risultati.sort(confrontaBaie);
+    }
+
     function elencoBaieScaricoComplete() {
         const elenco = [];
         for (let n = 101; n <= 107; n++) elenco.push(String(n));
@@ -2720,11 +2749,14 @@ function eParcheggioScarico(door) {
             + (freightParziali.length > 0 ? freightParziali.join(", ") : "Nessun parziale Freight")
             + '</div></div>';
 
-        const arriviAttuali = caricaArriviBaia();
-        const baieLibere = elencoBaieScaricoComplete().filter((n) => {
-            const voce = arriviAttuali[n];
-            return !voce || !voce.unitId;
-        });
+        let baieLibere = elencoParcheggioVerdiLiberiDaDOM();
+        if (baieLibere.length === 0) {
+            const arriviAttuali = caricaArriviBaia();
+            baieLibere = elencoBaieScaricoComplete().filter((n) => {
+                const voce = arriviAttuali[n];
+                return !voce || !voce.unitId;
+            });
+        }
 
         const parcheggiOccupati = elencoParcheggioScaricoOccupati().sort(confrontaBaie);
         html += '<div class="tnt-group-label">Parcheggio scarico (' + parcheggiOccupati.length + ')</div>';
@@ -2918,9 +2950,20 @@ function eParcheggioScarico(door) {
     const COLORE_SEZIONE_SCARICO = "#8B5CF6";
     const COLORE_SEZIONE_CARICO = "#FF7A00";
 
+    function riaggangiaSeOrfano(id, menu) {
+        const el = document.getElementById(id);
+        if (el && el.parentElement !== menu) menu.appendChild(el);
+    }
+
     function initIcone() {
         const menu = document.querySelector(".cc-hub-menu-panel");
         if (!menu) return;
+
+        [
+            "cc-menu-label-scarico-divider", "cc-menu-label-scarico",
+            "tnt-orologio-scarico-btn", "tnt-btn-scarica-report", "tnt-btn-statistiche", "tnt-btn-parcel-tempistica",
+            "cc-menu-label-carico-divider", "cc-menu-label-carico", "tnt-orologio-btn"
+        ].forEach((id) => riaggangiaSeOrfano(id, menu));
 
         if (!document.getElementById("cc-menu-label-scarico")) {
             const sezScarico = creaEtichettaSezioneMenu("cc-menu-label-scarico", "Scarico", COLORE_SEZIONE_SCARICO);
@@ -3032,6 +3075,7 @@ function eParcheggioScarico(door) {
         impostaBadgeInAttesa();
 
         try { caricaCacheMovimentiDaStorage(); } catch (e) {}
+        try { if (cacheMovimentiPerUnit.size) riarricchisciStoricoConMovimenti([...cacheMovimentiPerUnit.keys()]); } catch (e) {}
         try { caricaSessioniInCorsoDaStorage(); } catch (e) {}
         try { scanBlocchi(document.body); } catch (e) {}
         try { pulisciStoricoVecchio(); } catch (e) {}
@@ -3077,6 +3121,7 @@ function eParcheggioScarico(door) {
         setInterval(pollDockingDoorsAttivo, 8000);
         setInterval(pulisciStoricoVecchio, 60 * 60 * 1000);
         setInterval(pulisciRegistriSenzaBaia, 10 * 60 * 1000);
+        setInterval(() => { try { if (cacheMovimentiPerUnit.size) riarricchisciStoricoConMovimenti([...cacheMovimentiPerUnit.keys()]); } catch (e) {} }, 2 * 60 * 1000);
         setInterval(elaboraCodaVerificaBaie, 4000);
         setInterval(accodaBaieOccupateNonRegistrate, 10000);
         setInterval(accodaRiverificaRemarksSeAperto, 60000);
