@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.3
+// @version      3.4
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -23,7 +23,7 @@
     // ── Blocco Bad Loading: auto-compila il form Microsoft ─────────────────
     if (location.hostname === "forms.cloud.microsoft") {
         const BL_FIREBASE_PATH = "https://yostool-default-rtdb.firebaseio.com/badloading/pending.json";
-        const BL_WEB_API_KEY   = "AIzaSyAjl7ZVqQqIh6rAhMyPLRNMz5ouSvO5hts";
+        const BL_WEB_API_KEY = "AIzaSyAjl7ZVqQqIh6rAhMyPLRNMz5ouSvO5hts";
 
         async function blOtteniToken() {
             try {
@@ -894,8 +894,8 @@
         try {
             const raw = localStorage.getItem(STORAGE_KEY_COLLI_IMPOSTAZIONI);
             const obj = raw ? JSON.parse(raw) : {};
-            return { auto: obj.auto !== false, manuale: !!obj.manuale, orarioManuale: obj.orarioManuale || "16:00" };
-        } catch (e) { return { auto: true, manuale: false, orarioManuale: "16:00" }; }
+            return { auto: obj.auto !== false, manuale: !!obj.manuale, orarioManuale: obj.orarioManuale || "16:00", dataManuale: obj.dataManuale || "" };
+        } catch (e) { return { auto: true, manuale: false, orarioManuale: "16:00", dataManuale: "" }; }
     }
     function salvaImpostazioniColli(obj) {
         try { localStorage.setItem(STORAGE_KEY_COLLI_IMPOSTAZIONI, JSON.stringify(obj)); } catch (e) {}
@@ -905,6 +905,10 @@
         if (imp.manuale && /^\d{2}:\d{2}$/.test(imp.orarioManuale)) {
             const [h, m] = imp.orarioManuale.split(":").map(Number);
             const now = new Date();
+            if (/^\d{4}-\d{2}-\d{2}$/.test(imp.dataManuale)) {
+                const [y, mo, day] = imp.dataManuale.split("-").map(Number);
+                return new Date(y, mo - 1, day, h, m, 0, 0);
+            }
             const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
             if (d.getTime() > now.getTime()) d.setDate(d.getDate() - 1);
             return d;
@@ -1807,7 +1811,7 @@ function eParcheggioScarico(door) {
         if (locale && typeof locale.valore === "number") {
             statoTxt = locale.valore.toLocaleString("it-IT") + " colli";
             const d = new Date(locale.aggiornatoIl);
-            aggiornatoTxt = "Colli aggiornati alle ore " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+            aggiornatoTxt = "Colli aggiornati alle ore " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") + " del " + String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0");
         }
         body.innerHTML =
             '<div class="tnt-card"><div class="tnt-card-title">' + statoTxt + '</div>'
@@ -1818,7 +1822,10 @@ function eParcheggioScarico(door) {
             + '<button id="tnt-colli-aggiorna-ora" class="tnt-btn-primary">Aggiorna ora</button>'
             + '<label style="display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;"><input type="checkbox" id="tnt-colli-auto" ' + (imp.auto ? "checked" : "") + '> Aggiornamento automatico ogni 30 min</label>'
             + '<label style="display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;"><input type="checkbox" id="tnt-colli-manuale" ' + (imp.manuale ? "checked" : "") + '> Imposta a mano da che ora prendere i dati</label>'
-            + '<input type="time" id="tnt-colli-orario-manuale" value="' + imp.orarioManuale + '" ' + (imp.manuale ? "" : "disabled") + ' style="display:block;width:100%;box-sizing:border-box;margin:0 0 10px;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;">'
+            + '<div style="display:flex;gap:6px;margin:0 0 10px;">'
+                + '<input type="date" id="tnt-colli-data-manuale" value="' + (imp.dataManuale || new Date().toISOString().slice(0,10)) + '" ' + (imp.manuale ? "" : "disabled") + ' style="flex:1;box-sizing:border-box;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;">'
+                + '<input type="time" id="tnt-colli-orario-manuale" value="' + imp.orarioManuale + '" ' + (imp.manuale ? "" : "disabled") + ' style="flex:1;box-sizing:border-box;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;">'
+            + '</div>'
             + '<a href="' + costruisciUrlSplunk() + '" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8B5CF6;margin:4px 0 10px;">Apri la stessa ricerca su Splunk &#8599;</a>';
 
         document.getElementById("tnt-colli-aggiorna-ora").addEventListener("click", (e) => { e.stopPropagation(); aggiornaColliAutomatico(); });
@@ -1827,6 +1834,10 @@ function eParcheggioScarico(door) {
         });
         document.getElementById("tnt-colli-manuale").addEventListener("change", (e) => {
             const i = caricaImpostazioniColli(); i.manuale = e.target.checked; salvaImpostazioniColli(i);
+            renderPannelloProduttivita(body);
+        });
+        document.getElementById("tnt-colli-data-manuale").addEventListener("change", (e) => {
+            const i = caricaImpostazioniColli(); i.dataManuale = e.target.value || ""; salvaImpostazioniColli(i);
             renderPannelloProduttivita(body);
         });
         document.getElementById("tnt-colli-orario-manuale").addEventListener("change", (e) => {
@@ -2752,7 +2763,7 @@ function eParcheggioScarico(door) {
                     const url = FIREBASE_SYNC.BASE_URL + "/badloading/pending.json?auth=" + token;
                     await fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
                 } catch(e) {}
-                window.open(FORM_URL_BL, "_blank");
+                window.open(FORM_URL_BL, "tnt_bad_loading_form", "noopener,width=900,height=1000,left=100,top=50");
             });
             box.querySelectorAll("[data-copy]").forEach(function(btn) {
                 btn.addEventListener("click", function(e) {
@@ -2777,7 +2788,19 @@ function eParcheggioScarico(door) {
         btnBL.style.cssText = "background:#c0392b;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:12px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;";
         btnBL.addEventListener("mouseenter", () => { btnBL.style.background = "#e74c3c"; });
         btnBL.addEventListener("mouseleave", () => { btnBL.style.background = "#c0392b"; });
-        btnBL.addEventListener("click", (e) => { e.stopPropagation(); apriPopupBadLoading(); });
+        btnBL.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            const oggi2 = new Date();
+            const dataOpBL = String(oggi2.getDate()).padStart(2, "0") + "/" + String(oggi2.getMonth() + 1).padStart(2, "0") + "/" + oggi2.getFullYear();
+            const payload = { tipo: tipoViaggioBL, origine: codiceOrigineBL, targa: unitTestoBL || "", movementId: schedTripBL || "", dataOp: dataOpBL, ts: Date.now() };
+            try {
+                const token = await otteniIdTokenValido();
+                const url = FIREBASE_SYNC.BASE_URL + "/badloading/pending.json?auth=" + token;
+                await fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+            } catch(e) {}
+            window.open(FORM_URL_BL, "tnt_bad_loading_form", "noopener,width=900,height=1000,left=100,top=50");
+        });
+        btnBL.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); apriPopupBadLoading(); });
         colBtnBL.appendChild(btnBL);
         rigaBadLoading.appendChild(colBtnBL);
         const c2 = document.createElement("div"); c2.className = "col-4"; rigaBadLoading.appendChild(c2);
@@ -2955,6 +2978,7 @@ function eParcheggioScarico(door) {
             if (!voce || !voce.unitId) return;
             if (!eParcheggioScarico(doorNumber)) return;
             if (unitGiaScaricati.has(String(voce.unitId))) return;
+            if (statoBordoBaiaScarico(doorNumber) !== "verde") return;
             risultati.push(doorNumber);
         });
         return risultati;
