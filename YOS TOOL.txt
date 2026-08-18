@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.4
+// @version      3.5
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -256,6 +256,34 @@
     const urlParkingBayViste = new Set();
     const urlMovimentiViste = new Set();
 
+    const HEADER_CACHE_KEY = "tnt_auth_headers_cache_v1";
+    const HEADER_BLACKLIST = new Set(["content-type","accept","accept-language","cache-control","pragma","x-requested-with","content-length","connection","user-agent","origin","referer","cookie","host"]);
+    let headerAutenticazioneCache = {};
+    try { headerAutenticazioneCache = JSON.parse(sessionStorage.getItem(HEADER_CACHE_KEY) || "{}"); } catch (e) { headerAutenticazioneCache = {}; }
+    function salvaHeaderAutenticazioneCache() { try { sessionStorage.setItem(HEADER_CACHE_KEY, JSON.stringify(headerAutenticazioneCache)); } catch (e) {} }
+
+    const _pollBlacklist401 = new Map();
+    const BLOCCO_401_MS = 90000;
+
+    function catturaHeaderAutenticazione(url, headers) {
+        if (!headers) return;
+        const urlStr = String(url || "");
+        if (urlStr.indexOf("/yos/api/") === -1) return;
+        let coppie = [];
+        try {
+            if (typeof Headers !== "undefined" && headers instanceof Headers) headers.forEach((v, k) => coppie.push([k, v]));
+            else if (Array.isArray(headers)) coppie = headers;
+            else if (typeof headers === "object") coppie = Object.entries(headers);
+        } catch (e) { return; }
+        let modificato = false;
+        coppie.forEach(([k, v]) => {
+            const chiave = String(k).toLowerCase();
+            if (HEADER_BLACKLIST.has(chiave)) return;
+            if (headerAutenticazioneCache[chiave] !== v) { headerAutenticazioneCache[chiave] = v; modificato = true; }
+        });
+        if (modificato) { salvaHeaderAutenticazioneCache(); _pollBlacklist401.clear(); }
+    }
+
     function gestisciRispostaIntercettata(url, testoBody) {
         const urlStr = String(url || "");
         try {
@@ -283,11 +311,18 @@
     (function interceptaXHR() {
         const origOpen = XMLHttpRequest.prototype.open;
         const origSend = XMLHttpRequest.prototype.send;
+        const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
         XMLHttpRequest.prototype.open = function (method, url) {
             this._tntUrl = url;
+            this._tntHeaders = {};
             return origOpen.apply(this, arguments);
         };
+        XMLHttpRequest.prototype.setRequestHeader = function (nome, valore) {
+            try { if (this._tntHeaders) this._tntHeaders[nome] = valore; } catch (e) {}
+            return origSetHeader.apply(this, arguments);
+        };
         XMLHttpRequest.prototype.send = function (body) {
+            try { catturaHeaderAutenticazione(this._tntUrl, this._tntHeaders); } catch (e) {}
             this.addEventListener("load", function () {
                 try { gestisciRispostaIntercettata(this._tntUrl, this.responseText); } catch (e) {}
             });
@@ -300,6 +335,10 @@
         const origFetch = window.fetch;
         window.fetch = function (input, init) {
             const url = typeof input === "string" ? input : (input && input.url) || "";
+            try {
+                const h = (init && init.headers) ? init.headers : (input && input.headers);
+                catturaHeaderAutenticazione(url, h);
+            } catch (e) {}
             return origFetch.apply(this, arguments).then((response) => {
                 try {
                     response.clone().text().then((testo) => {
@@ -315,14 +354,21 @@
     const POLL_COOLDOWN_MS = 7000;
 
     async function pollDockingDoorsAttivo() {
+        if (Object.keys(headerAutenticazioneCache).length === 0) return;
         const ora = Date.now();
         const urls = [...urlDockingDoorsViste, ...urlParkingBayViste, ...urlMovimentiViste];
         if (urls.length === 0) return;
         await Promise.all(urls.map(async (url) => {
+            const bloccoFino = _pollBlacklist401.get(url) || 0;
+            if (ora < bloccoFino) return;
             const ultimoOk = _pollCooldown.get(url) || 0;
             if (ora - ultimoOk < POLL_COOLDOWN_MS) return;
             try {
-                const risp = await fetch(url, { credentials: "include", cache: "no-store" });
+                const risp = await fetch(url, { credentials: "include", cache: "no-store", headers: headerAutenticazioneCache });
+                if (risp.status === 401 || risp.status === 403) {
+                    _pollBlacklist401.set(url, Date.now() + BLOCCO_401_MS);
+                    return;
+                }
                 if (risp.ok) _pollCooldown.set(url, Date.now());
                 const testo = await risp.text();
                 gestisciRispostaIntercettata(url, testo);
