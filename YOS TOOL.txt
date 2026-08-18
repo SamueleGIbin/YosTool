@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.5
+// @version      3.8
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -219,9 +219,22 @@
     const GIORNI_STORICO_TREND = 30;
     const GIORNI_MEDIA_TREND = 7;
 
+    function minutiOrdinamentoCutoff(orarioTesto) {
+        const m = String(orarioTesto || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+        if (!m) return 999999;
+        let ore = parseInt(m[1], 10);
+        const minuti = parseInt(m[2], 10);
+        if (ore < 12) ore += 24;
+        return ore * 60 + minuti;
+    }
+
+    function ordinaGruppiPerCutoff(gruppi) {
+        return [...gruppi].sort((a, b) => minutiOrdinamentoCutoff(a.scadenza) - minutiOrdinamentoCutoff(b.scadenza));
+    }
+
     const DATI_TEMPISTICA_PARCEL = [
         { turno: "PRIMO SHIFT SCARICO", gruppi: [
-            { categoria: "IMPORT DI PRIMA", arrivo: "20:00", scadenza: "21:30", codici: "DNG-XWT-WA1-QAR-MAD-BZQ-MV9-XXJ-DFT-BCN-MXP" },
+            { categoria: "IMPORT DI PRIMA", arrivo: "20:00", scadenza: "21:30", codici: "DNG-XWT-WA1-QAR-MAD-BZQ-MV9-XXJ-DFT-BCN-MXP-ZRH" },
             { categoria: "CLIENTI DOM", arrivo: "21:00", scadenza: "21:45", codici: "AOS1-SATCI-AT21-RUBIX-ESSENZ-GAMESTOP-CEMBR-PJLO-COWA-HILTI-APLE-PENT-LIVA-UFAL-INCO-RUNNER-PNT1-COVD-TRAS" },
             { categoria: "FILIALI PER SUD", arrivo: "21:00", scadenza: "21:45", codici: "ISV-IOE-PRG" },
             { categoria: "CLIENTI INT", arrivo: "22:30", scadenza: "1:00", codici: "LIVA-GEWISS-MASE-UFAL-APLE-GDEC" },
@@ -563,6 +576,33 @@
         return null;
     }
 
+    const LATI_CHIUDIBILI = { "100": [101, 102, 103, 104, 105, 106, 107], "200": [201, 202, 203, 204, 205, 206, 207] };
+    const STORAGE_KEY_LATI_CHIUSI = "tnt_lati_chiusi_scarico_v1";
+    let latiChiusiScarico = { "100": false, "200": false };
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY_LATI_CHIUSI);
+        if (raw) Object.assign(latiChiusiScarico, JSON.parse(raw));
+    } catch (e) {}
+    function salvaLatiChiusiScarico() { try { localStorage.setItem(STORAGE_KEY_LATI_CHIUSI, JSON.stringify(latiChiusiScarico)); } catch (e) {} }
+    function baieDelLato(lato) { return (LATI_CHIUDIBILI[lato] || []).map(String); }
+    function baieOccupateDelLato(lato) {
+        const arrivi = caricaArriviBaia();
+        return baieDelLato(lato).filter((n) => { const v = arrivi[n]; return v && v.unitId; });
+    }
+    function toggleLatoChiuso(lato) {
+        if (!LATI_CHIUDIBILI[lato]) return;
+        latiChiusiScarico[lato] = !latiChiusiScarico[lato];
+        salvaLatiChiusiScarico();
+        aggiornaPannelloScaricoSeAperto();
+    }
+
+    document.addEventListener("click", (e) => {
+        const btn = e.target.closest(".tnt-lato-btn");
+        if (!btn) return;
+        e.stopPropagation();
+        toggleLatoChiuso(btn.getAttribute("data-lato"));
+    }, true);
+
     const sessioniScaricoInCorso = new Map();
     const STORAGE_KEY_SESSIONI_SCARICO = "tnt_sessioni_scarico_v1";
     const STORAGE_KEY_SESSIONI_IN_CORSO = "tnt_sessioni_scarico_in_corso_v1";
@@ -708,10 +748,17 @@
     const codaVerificaBaie = [];
     let codaInLavorazione = false;
 
+    function elementoIndicaShunterReale(wrapper) {
+        if (!wrapper) return false;
+        const el = wrapper.querySelector('[class*="shunter"]');
+        if (!el) return false;
+        return [...el.classList].some((c) => c.toLowerCase().indexOf("shunter") !== -1 && c !== "shunter-door-text");
+    }
+
     function eBaiaInShunter(doorNumber) {
         const wrapper = trovaElementoBaiaPerNumero(doorNumber);
         if (!wrapper) return false;
-        return !!wrapper.querySelector('[class*="shunter"]');
+        return elementoIndicaShunterReale(wrapper);
     }
 
     const remarksUltimaVerifica = new Map();
@@ -768,6 +815,59 @@
         });
     }
 
+    function simulaHoverReale(elemento) {
+        if (!elemento) return;
+        const rect = elemento.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        const opzioni = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y };
+        ["pointerover", "pointerenter", "mouseover", "mouseenter", "mousemove"].forEach((tipo) => {
+            try {
+                const EventCtor = tipo.indexOf("pointer") === 0 && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
+                elemento.dispatchEvent(new EventCtor(tipo, opzioni));
+            } catch (e) {}
+        });
+    }
+
+    function rimuoviHoverReale(elemento) {
+        if (!elemento) return;
+        const opzioni = { bubbles: true, cancelable: true, composed: true, view: window };
+        ["pointerout", "pointerleave", "mouseout", "mouseleave"].forEach((tipo) => {
+            try {
+                const EventCtor = tipo.indexOf("pointer") === 0 && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
+                elemento.dispatchEvent(new EventCtor(tipo, opzioni));
+            } catch (e) {}
+        });
+    }
+
+    function leggiTooltipBaiaCorrente() {
+        const el = [...document.querySelectorAll(".docking-door__tooltip")].find((t) => t.offsetParent !== null);
+        if (!el) return null;
+        const righe = {};
+        el.querySelectorAll("tr").forEach((tr) => {
+            const celle = tr.querySelectorAll("td");
+            if (celle.length < 2) return;
+            const chiave = celle[0].textContent.trim();
+            const valore = celle[1].textContent.trim();
+            if (chiave) righe[chiave] = valore;
+        });
+        return righe;
+    }
+
+    async function aggiornaRemarksViaHover(doorNumber) {
+        const wrapper = trovaElementoBaiaPerNumero(doorNumber);
+        if (!wrapper) return false;
+        simulaHoverReale(wrapper);
+        await new Promise((r) => setTimeout(r, 250));
+        const righe = leggiTooltipBaiaCorrente();
+        rimuoviHoverReale(wrapper);
+        if (!righe) return false;
+        const testoRemarks = righe["YOS Remark"] || righe["ROCS Remark"] || "";
+        if (testoRemarks) cacheRemarksPerBaia.set(doorNumber, { testo: testoRemarks, ts: new Date().toISOString() });
+        else cacheRemarksPerBaia.delete(doorNumber);
+        return true;
+    }
+
     async function elaboraCodaVerificaBaie() {
         if (codaInLavorazione || codaVerificaBaie.length === 0) return;
         codaInLavorazione = true;
@@ -779,6 +879,15 @@
                 if (attuale && attuale.unitId) { codaInLavorazione = false; return; }
                 if (eBaiaInShunter(voce.doorNumber)) { codaInLavorazione = false; return; }
             } else if (!attuale || String(attuale.unitId) !== voce.unitId) { codaInLavorazione = false; return; }
+            if (voce.soloRemarks) {
+                const eraEscluso = remarksEsclusiOrologio(cacheRemarksPerBaia.get(voce.doorNumber));
+                const aggiornato = await aggiornaRemarksViaHover(voce.doorNumber);
+                if (aggiornato) {
+                    if (eraEscluso !== remarksEsclusiOrologio(cacheRemarksPerBaia.get(voce.doorNumber))) aggiornaPannelloScaricoSeAperto();
+                    codaInLavorazione = false;
+                    return;
+                }
+            }
             if (!voce.soloRemarks && (leggiCacheCutoffBaia(voce.doorNumber) || calcolaCutoffDaCacheMovimenti(voce.doorNumber))) {
                 unitVerificatiCutoff.add(voce.unitId);
                 codaInLavorazione = false;
@@ -852,7 +961,7 @@
     };
 
     const CATEGORIE = [
-        { nome: "Import di Prima", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 30, codici: ["DNG", "QAR", "XWT", "MAD", "WA1", "BZQ", "MV9", "BCN", "DFT", "MXP", "XXJ"] },
+        { nome: "Import di Prima", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 30, codici: ["DNG", "QAR", "XWT", "MAD", "WA1", "BZQ", "MV9", "BCN", "DFT", "MXP", "XXJ", "ZRH"] },
         { nome: "Clienti Domestic", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 45, codici: ["AOS1", "ESSENZ", "SATCI", "GAMESTOP", "AT21", "CEMB", "RUBI", "PJLO", "COWA", "HILT", "INCO", "PENT", "LIVA", "RUNN", "PNT1", "TRAS", "COVD"] },
         { nome: "Filiali per Sud", turno: "Primo Shift", cutoffOre: 21, cutoffMin: 45, codici: ["ISV", "IOE", "PRG"] },
         { nome: "Import Prima Downgradato", turno: "Primo Shift", cutoffOre: 23, cutoffMin: 45, codici: ["HNJ", "DNG*", "DFT*", "BCN", "ECL", "LUG"] },
@@ -1405,7 +1514,7 @@ function eParcheggioScarico(door) {
             if (categoriaBaia(doorNumber) !== "Scarico") return;
             const wrapper = numEl.closest('[id^="unit_"]');
             if (!wrapper) return;
-            if (wrapper.querySelector('[class*="shunter"]')) return;
+            if (elementoIndicaShunterReale(wrapper)) return;
             const targaEl = wrapper.querySelector('[id^="unitname_"]');
             const targa = targaEl ? targaEl.textContent.trim() : "";
             if (!targa) return;
@@ -2631,7 +2740,7 @@ function eParcheggioScarico(door) {
             + '</div>';
         DATI_TEMPISTICA_PARCEL.forEach((turno) => {
             html += '<div class="tnt-group-label">' + turno.turno + '</div>';
-            turno.gruppi.forEach((g) => {
+            ordinaGruppiPerCutoff(turno.gruppi).forEach((g) => {
                 html += '<div class="tnt-card tnt-parcel-riga" data-ricerca="' + escapeHtml((g.categoria + ' ' + g.codici).toLowerCase()) + '">'
                     + '<div class="tnt-card-row">'
                     + '<span class="tnt-card-title">' + escapeHtml(g.categoria) + '</span>'
@@ -2922,7 +3031,7 @@ function eParcheggioScarico(door) {
             if (testo !== doorNumber) continue;
             if (el.offsetParent === null) continue;
             const wrapper = el.closest('[id^="unit_"]');
-            if (wrapper && wrapper.querySelector('[class*="shunter"]')) return wrapper;
+            if (wrapper && elementoIndicaShunterReale(wrapper)) return wrapper;
         }
         for (const el of nodi) {
             const span = el.querySelector("span") || el;
@@ -2938,7 +3047,7 @@ function eParcheggioScarico(door) {
     function statoBordoBaiaScarico(doorNumber) {
         const wrapper = trovaWrapperBaiaScarico(doorNumber);
         if (!wrapper) return null;
-        if (wrapper.querySelector('[class*="shunter"]')) return "shunter";
+        if (elementoIndicaShunterReale(wrapper)) return "shunter";
         const container = wrapper.querySelector(".container");
         if (!container) return null;
         const cls = " " + (container.className || "") + " ";
@@ -3111,6 +3220,11 @@ function eParcheggioScarico(door) {
                 return !voce || !voce.unitId;
             });
         }
+        const baieLatiChiusi = new Set([
+            ...(latiChiusiScarico["100"] ? baieDelLato("100") : []),
+            ...(latiChiusiScarico["200"] ? baieDelLato("200") : [])
+        ]);
+        if (baieLatiChiusi.size > 0) baieLibere = baieLibere.filter((n) => !baieLatiChiusi.has(n));
 
         const parcheggiOccupati = elencoParcheggioScaricoOccupati().sort(confrontaBaie);
         html += '<div class="tnt-group-label">Parcheggio scarico (' + parcheggiOccupati.length + ')</div>';
@@ -3122,6 +3236,24 @@ function eParcheggioScarico(door) {
         html += '<div class="tnt-card tnt-card-verde"><div class="tnt-card-sub">'
             + (baieLibere.length > 0 ? baieLibere.join(", ") : "Nessuna baia libera")
             + '</div></div>';
+
+        const avvisiSpostamento = [];
+        ["100", "200"].forEach((lato) => {
+            if (!latiChiusiScarico[lato]) return;
+            baieOccupateDelLato(lato).forEach((n) => avvisiSpostamento.push(n));
+        });
+        if (avvisiSpostamento.length > 0) {
+            html += '<div class="tnt-footnote" style="background:#5c1717;color:#FFD5D5;">'
+                + avvisiSpostamento.sort(confrontaBaie).map((n) => "Attenzione, spostamento in " + n).join("<br>")
+                + '</div>';
+        }
+
+        html += '<div class="tnt-lato-toggle-row" style="display:flex;gap:8px;margin:10px 6px 4px;">'
+            + '<button type="button" class="tnt-lato-btn" data-lato="100" style="flex:1;padding:8px;border-radius:6px;border:none;font-weight:700;font-size:12px;cursor:pointer;background:'
+                + (latiChiusiScarico["100"] ? "#5c1717;color:#FFD5D5;" : "#043d33;color:#BFF3DF;") + '">100 ' + (latiChiusiScarico["100"] ? "chiusa" : "aperta") + '</button>'
+            + '<button type="button" class="tnt-lato-btn" data-lato="200" style="flex:1;padding:8px;border-radius:6px;border:none;font-weight:700;font-size:12px;cursor:pointer;background:'
+                + (latiChiusiScarico["200"] ? "#5c1717;color:#FFD5D5;" : "#043d33;color:#BFF3DF;") + '">200 ' + (latiChiusiScarico["200"] ? "chiusa" : "aperta") + '</button>'
+            + '</div>';
 
         panelBody.innerHTML = html;
     }
@@ -3414,7 +3546,7 @@ function eParcheggioScarico(door) {
     window.addEventListener("resize", schedulaRiposizionamento);
     window.addEventListener("scroll", schedulaRiposizionamento, true);
 
-    document.addEventListener("click", (e) => {
+    function aggiornaBaiaSelezionataDaEvento(e) {
         const wrapper = e.target.closest('[id^="unit_"]');
         if (!wrapper) return;
         const numEl = wrapper.querySelector(DOOR_NUM_SELECTOR_SCARICO);
@@ -3423,7 +3555,10 @@ function eParcheggioScarico(door) {
         if (!span) return;
         const doorNumber = span.textContent.trim();
         if (doorNumber) baiaSelezionata = doorNumber;
-    }, true);
+    }
+    ["click", "pointerdown", "mousedown", "touchstart"].forEach((tipo) => {
+        document.addEventListener(tipo, aggiornaBaiaSelezionataDaEvento, true);
+    });
 
     function avviaTool() {
         impostaBadgeInAttesa();
