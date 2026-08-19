@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.9
+// @version      3.10
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -420,7 +420,7 @@
                 badge.className = "tnt-badge-buffer";
                 badge.textContent = "BUFFER";
                 badge.style.cssText = "position:absolute;top:2px;left:2px;background:#c0392b;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px;z-index:50;pointer-events:none;";
-                wrapper.style.position = wrapper.style.position || "relative";
+                if (getComputedStyle(wrapper).position === "static") wrapper.style.position = "relative";
                 wrapper.appendChild(badge);
             }
         } else if (badge) {
@@ -1687,14 +1687,20 @@ function eParcheggioScarico(door) {
             try {
                 localStorage.setItem(chiave, JSON.stringify(arr));
                 if (scartati) {
-                    console.warn("[YOS TOOL] Quota locale piena: rimossi i " + (array.length - arr.length) + " record piu' vecchi di", chiave);
+                    console.warn("[YOS TOOL] Quota locale piena: rimossa la giornata piu' vecchia da", chiave);
                     avvisaStorageQuasiPieno();
                 }
                 return arr;
             } catch (e) {
                 scartati = true;
-                const daRimuovere = Math.max(1, Math.floor(arr.length * 0.1));
-                arr = arr.slice(0, arr.length - daRimuovere);
+                const giorniPresenti = new Set();
+                arr.forEach((r) => { const t = chiaveTempoFn(r) ? new Date(chiaveTempoFn(r)).getTime() : NaN; if (!isNaN(t)) giorniPresenti.add(chiaveGiorno(t)); });
+                const giornoPiuVecchio = [...giorniPresenti].sort()[0];
+                if (!giornoPiuVecchio) { arr = []; break; }
+                arr = arr.filter((r) => {
+                    const t = chiaveTempoFn(r) ? new Date(chiaveTempoFn(r)).getTime() : NaN;
+                    return isNaN(t) ? false : chiaveGiorno(t) !== giornoPiuVecchio;
+                });
             }
         }
         try { localStorage.removeItem(chiave); } catch (e) {}
@@ -1742,11 +1748,29 @@ function eParcheggioScarico(door) {
         return Array.from(mappa.values());
     }
 
+    function chiaveGiorno(t) {
+        const d = new Date(t);
+        if (isNaN(d.getTime())) return null;
+        return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+    }
+
+    function tieniUltimiGiorniInteri(records, chiaveTempoFn, numGiorni) {
+        const giorniPresenti = new Set();
+        records.forEach((r) => {
+            const t = chiaveTempoFn(r) ? new Date(chiaveTempoFn(r)).getTime() : NaN;
+            if (!isNaN(t)) giorniPresenti.add(chiaveGiorno(t));
+        });
+        const daTenere = new Set([...giorniPresenti].sort().slice(-numGiorni));
+        return records.filter((r) => {
+            const t = chiaveTempoFn(r) ? new Date(chiaveTempoFn(r)).getTime() : NaN;
+            return !isNaN(t) && daTenere.has(chiaveGiorno(t));
+        });
+    }
+
     function applicaRetentionCondivisa(storico, sessioni) {
-        const limite = Date.now() - GIORNI_STORICO_TREND * 24 * 60 * 60 * 1000;
         return {
-            storico: storico.filter((r) => { const t = r.timestampIso ? new Date(r.timestampIso).getTime() : NaN; return !isNaN(t) && t >= limite; }),
-            sessioni: sessioni.filter((s) => { const t = s.inizioIso ? new Date(s.inizioIso).getTime() : NaN; return !isNaN(t) && t >= limite; })
+            storico: tieniUltimiGiorniInteri(storico, (r) => r.timestampIso, GIORNI_STORICO_TREND),
+            sessioni: tieniUltimiGiorniInteri(sessioni, (s) => s.inizioIso, GIORNI_STORICO_TREND)
         };
     }
 
@@ -2274,20 +2298,13 @@ function eParcheggioScarico(door) {
 
     function pulisciStoricoVecchio() {
         const storico = caricaStoricoReport();
-        const limite = Date.now() - GIORNI_STORICO_TREND * 24 * 60 * 60 * 1000;
         if (storico.length > 0) {
-            const filtrato = storico.filter((r) => {
-                const t = r.timestampIso ? new Date(r.timestampIso).getTime() : NaN;
-                return !isNaN(t) && t >= limite;
-            });
+            const filtrato = tieniUltimiGiorniInteri(storico, (r) => r.timestampIso, GIORNI_STORICO_TREND);
             if (filtrato.length !== storico.length) salvaStoricoReport(filtrato);
         }
         const sessioni = caricaSessioniScarico();
         if (sessioni.length > 0) {
-            const sessioniFiltrate = sessioni.filter((s) => {
-                const t = s.inizioIso ? new Date(s.inizioIso).getTime() : NaN;
-                return !isNaN(t) && t >= limite;
-            });
+            const sessioniFiltrate = tieniUltimiGiorniInteri(sessioni, (s) => s.inizioIso, GIORNI_STORICO_TREND);
             if (sessioniFiltrate.length !== sessioni.length) salvaSessioniScarico(sessioniFiltrate);
         }
     }
@@ -2666,16 +2683,29 @@ function eParcheggioScarico(door) {
         cont.innerHTML = html;
     }
 
+    function dataMinimaDisponibile() {
+        let minT = null;
+        caricaStoricoReport().forEach((r) => { const t = r.timestampIso ? new Date(r.timestampIso).getTime() : NaN; if (!isNaN(t) && (minT === null || t < minT)) minT = t; });
+        caricaSessioniScarico().forEach((s) => { const t = s.inizioIso ? new Date(s.inizioIso).getTime() : NaN; if (!isNaN(t) && (minT === null || t < minT)) minT = t; });
+        return minT === null ? null : new Date(minT).toISOString().slice(0, 10);
+    }
+
     function renderPannelloStatistiche(panelBody) {
         const oggi = new Date().toISOString().slice(0, 10);
+        const dataMin = dataMinimaDisponibile();
+        const attrMin = dataMin ? ' min="' + dataMin + '"' : "";
+        const etichettaMin = dataMin
+            ? '<div class="tnt-footnote">Dati disponibili dal ' + dataMin.split("-").reverse().join("/") + '</div>'
+            : '<div class="tnt-footnote">Nessun dato ancora disponibile</div>';
         panelBody.innerHTML =
             '<div class="tnt-group-label">Colli totali turno (da Splunk)</div>' +
             '<div id="tnt-stat-colli"></div>' +
+            etichettaMin +
             '<label>Dal giorno</label>' +
-            '<div class="tnt-riga-data-ora"><input type="date" id="tnt-stat-data-inizio" value="' + oggi + '">' +
+            '<div class="tnt-riga-data-ora"><input type="date" id="tnt-stat-data-inizio" value="' + oggi + '"' + attrMin + ' max="' + oggi + '">' +
             '<input type="time" id="tnt-stat-ora-inizio" value="00:00"></div>' +
             '<label>Al giorno</label>' +
-            '<div class="tnt-riga-data-ora"><input type="date" id="tnt-stat-data-fine" value="' + oggi + '">' +
+            '<div class="tnt-riga-data-ora"><input type="date" id="tnt-stat-data-fine" value="' + oggi + '"' + attrMin + ' max="' + oggi + '">' +
             '<input type="time" id="tnt-stat-ora-fine" value="23:59"></div>' +
             '<button id="tnt-stat-btn-calcola" class="tnt-btn-primary">Calcola statistiche</button>' +
             '<button id="tnt-stat-btn-tutto" class="tnt-btn-secondary">Statistiche su tutto lo storico</button>' +
@@ -2845,11 +2875,17 @@ function eParcheggioScarico(door) {
 
     function renderPannelloReport(panelBody) {
         const oggi = new Date().toISOString().slice(0, 10);
+        const dataMin = dataMinimaDisponibile();
+        const attrMin = dataMin ? ' min="' + dataMin + '"' : "";
+        const etichettaMin = dataMin
+            ? '<div class="tnt-footnote">Dati disponibili dal ' + dataMin.split("-").reverse().join("/") + '</div>'
+            : '<div class="tnt-footnote">Nessun dato ancora disponibile</div>';
         panelBody.innerHTML =
+            etichettaMin +
             '<label>Dal giorno</label>' +
-            '<input type="date" id="tnt-report-data-inizio" value="' + oggi + '">' +
+            '<input type="date" id="tnt-report-data-inizio" value="' + oggi + '"' + attrMin + ' max="' + oggi + '">' +
             '<label>Al giorno</label>' +
-            '<input type="date" id="tnt-report-data-fine" value="' + oggi + '">' +
+            '<input type="date" id="tnt-report-data-fine" value="' + oggi + '"' + attrMin + ' max="' + oggi + '">' +
             '<button id="tnt-report-btn-scarica" class="tnt-btn-primary">Scarica Excel periodo</button>' +
             '<button id="tnt-report-btn-tutto" class="tnt-btn-secondary">Scarica tutto lo storico</button>';
 
@@ -3013,7 +3049,7 @@ function eParcheggioScarico(door) {
         colBtnBL.style.flex = "1";
         const btnBL = document.createElement("button");
         btnBL.textContent = "\u26A0 Bad Loading";
-        btnBL.style.cssText = "background:#c0392b;color:#fff;border:none;border-radius:6px;padding:5px 8px;font-size:11px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;";
+        btnBL.style.cssText = "background:#c0392b;color:#fff;border:none;border-radius:5px;padding:3px 6px;font-size:10px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;";
         btnBL.addEventListener("mouseenter", () => { btnBL.style.background = "#e74c3c"; });
         btnBL.addEventListener("mouseleave", () => { btnBL.style.background = "#c0392b"; });
         btnBL.addEventListener("click", async (e) => {
@@ -3035,12 +3071,11 @@ function eParcheggioScarico(door) {
         const colBtnBuf = document.createElement("div");
         colBtnBuf.style.flex = "1";
         const btnBuf = document.createElement("button");
+        btnBuf.style.cssText = "color:#fff;border:none;border-radius:5px;padding:3px 6px;font-size:10px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;background:#8e44ad;";
         function aggiornaTestoBtnBuf() {
             const attivo = baiaSelezionata && bufferManualeBaie.has(baiaSelezionata);
             btnBuf.textContent = attivo ? "\u2713 Buffer" : "Segnala buffer";
-            btnBuf.style.background = attivo ? "#8e44ad" : "#3a3a3c";
         }
-        btnBuf.style.cssText = "color:#fff;border:none;border-radius:6px;padding:5px 8px;font-size:11px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;";
         aggiornaTestoBtnBuf();
         btnBuf.addEventListener("click", async (e) => {
             e.stopPropagation();
