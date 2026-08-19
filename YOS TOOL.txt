@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.8
+// @version      3.9
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -392,6 +392,77 @@
     const cacheMovimentiPerUnit = new Map();
     const cacheCutoffPerBaia = new Map();
     const cacheRemarksPerBaia = new Map();
+    const bufferManualeBaie = new Map();
+    const STORAGE_KEY_BUFFER_MANUALE = "tnt_buffer_manuale_v1";
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY_BUFFER_MANUALE);
+        const obj = raw ? JSON.parse(raw) : {};
+        Object.keys(obj).forEach((k) => bufferManualeBaie.set(k, obj[k]));
+    } catch (e) {}
+    function salvaBufferManualeSuStorage() {
+        try {
+            const obj = {};
+            bufferManualeBaie.forEach((v, k) => { obj[k] = v; });
+            localStorage.setItem(STORAGE_KEY_BUFFER_MANUALE, JSON.stringify(obj));
+        } catch (e) {}
+    }
+    function baiaBloccataScarico(doorNumber) {
+        if (bufferManualeBaie.has(doorNumber)) return true;
+        return remarksEsclusiOrologio(cacheRemarksPerBaia.get(doorNumber));
+    }
+    function aggiornaBadgeBufferSuDOM(doorNumber, attivo) {
+        const wrapper = trovaElementoBaiaPerNumero(doorNumber);
+        if (!wrapper) return;
+        let badge = wrapper.querySelector(".tnt-badge-buffer");
+        if (attivo) {
+            if (!badge) {
+                badge = document.createElement("div");
+                badge.className = "tnt-badge-buffer";
+                badge.textContent = "BUFFER";
+                badge.style.cssText = "position:absolute;top:2px;left:2px;background:#c0392b;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px;z-index:50;pointer-events:none;";
+                wrapper.style.position = wrapper.style.position || "relative";
+                wrapper.appendChild(badge);
+            }
+        } else if (badge) {
+            badge.remove();
+        }
+    }
+    async function sincronizzaBufferManuale() {
+        if (!FIREBASE_SYNC.ATTIVO) return;
+        try {
+            const token = await otteniIdTokenValido();
+            const url = FIREBASE_SYNC.BASE_URL + "/bufferManuale.json?auth=" + token;
+            const res = await fetch(url, { cache: "no-store" });
+            if (!res.ok) return;
+            const remoto = await res.json();
+            if (!remoto || typeof remoto !== "object") return;
+            let modificato = false;
+            Object.keys(remoto).forEach((k) => {
+                if (!bufferManualeBaie.has(k)) { bufferManualeBaie.set(k, remoto[k]); aggiornaBadgeBufferSuDOM(k, true); modificato = true; }
+            });
+            [...bufferManualeBaie.keys()].forEach((k) => {
+                if (!remoto[k]) { bufferManualeBaie.delete(k); aggiornaBadgeBufferSuDOM(k, false); modificato = true; }
+            });
+            if (modificato) { salvaBufferManualeSuStorage(); aggiornaPannelloScaricoSeAperto(); }
+        } catch (e) {}
+    }
+
+    async function toggleBufferManuale(doorNumber) {
+        if (!doorNumber) return;
+        const attivo = bufferManualeBaie.has(doorNumber);
+        if (attivo) bufferManualeBaie.delete(doorNumber);
+        else bufferManualeBaie.set(doorNumber, { ts: new Date().toISOString() });
+        salvaBufferManualeSuStorage();
+        aggiornaBadgeBufferSuDOM(doorNumber, !attivo);
+        aggiornaPannelloScaricoSeAperto();
+        try {
+            const token = await otteniIdTokenValido();
+            const url = FIREBASE_SYNC.BASE_URL + "/bufferManuale/" + doorNumber + ".json?auth=" + token;
+            if (attivo) await fetch(url, { method: "DELETE" });
+            else await fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ts: new Date().toISOString() }) });
+        } catch (e) {}
+    }
+
 
     const STORAGE_KEY_CACHE_MOVIMENTI = "tnt_cache_movimenti_per_unit_v1";
     function caricaCacheMovimentiDaStorage() {
@@ -770,7 +841,7 @@
             if (categoriaBaia(doorNumber) !== "Scarico") return;
             const voce = arrivi[doorNumber];
             if (!voce || !voce.unitId) return;
-            if (remarksEsclusiOrologio(cacheRemarksPerBaia.get(doorNumber))) return;
+            if (baiaBloccataScarico(doorNumber)) return;
             const chiave = String(voce.unitId);
             const ultima = remarksUltimaVerifica.get(chiave) || 0;
             if (Date.now() - ultima < INTERVALLO_RIVERIFICA_REMARKS_MS) return;
@@ -2936,11 +3007,13 @@ function eParcheggioScarico(door) {
         const rigaBadLoading = document.createElement("div");
         rigaBadLoading.className = "row door-info__movmt-section-row tnt-bad-loading-row";
         rigaBadLoading.style.marginTop = "10px";
+        rigaBadLoading.style.display = "flex";
+        rigaBadLoading.style.gap = "6px";
         const colBtnBL = document.createElement("div");
-        colBtnBL.className = "col-4";
+        colBtnBL.style.flex = "1";
         const btnBL = document.createElement("button");
         btnBL.textContent = "\u26A0 Bad Loading";
-        btnBL.style.cssText = "background:#c0392b;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:12px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;";
+        btnBL.style.cssText = "background:#c0392b;color:#fff;border:none;border-radius:6px;padding:5px 8px;font-size:11px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;";
         btnBL.addEventListener("mouseenter", () => { btnBL.style.background = "#e74c3c"; });
         btnBL.addEventListener("mouseleave", () => { btnBL.style.background = "#c0392b"; });
         btnBL.addEventListener("click", async (e) => {
@@ -2958,8 +3031,25 @@ function eParcheggioScarico(door) {
         btnBL.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); apriPopupBadLoading(); });
         colBtnBL.appendChild(btnBL);
         rigaBadLoading.appendChild(colBtnBL);
-        const c2 = document.createElement("div"); c2.className = "col-4"; rigaBadLoading.appendChild(c2);
-        const c3 = document.createElement("div"); c3.className = "col-4"; rigaBadLoading.appendChild(c3);
+
+        const colBtnBuf = document.createElement("div");
+        colBtnBuf.style.flex = "1";
+        const btnBuf = document.createElement("button");
+        function aggiornaTestoBtnBuf() {
+            const attivo = baiaSelezionata && bufferManualeBaie.has(baiaSelezionata);
+            btnBuf.textContent = attivo ? "\u2713 Buffer" : "Segnala buffer";
+            btnBuf.style.background = attivo ? "#8e44ad" : "#3a3a3c";
+        }
+        btnBuf.style.cssText = "color:#fff;border:none;border-radius:6px;padding:5px 8px;font-size:11px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;";
+        aggiornaTestoBtnBuf();
+        btnBuf.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            if (!baiaSelezionata) return;
+            await toggleBufferManuale(baiaSelezionata);
+            aggiornaTestoBtnBuf();
+        });
+        colBtnBuf.appendChild(btnBuf);
+        rigaBadLoading.appendChild(colBtnBuf);
         rigaNuova.insertAdjacentElement("afterend", rigaBadLoading);
     }
 
@@ -3076,7 +3166,7 @@ function eParcheggioScarico(door) {
         const baie = trovaBaieScaricoOccupate();
         const arriviCorrenti = caricaArriviBaia();
         for (const baia of baie) {
-            if (remarksEsclusiOrologio(cacheRemarksPerBaia.get(baia.doorNumber))) continue;
+            if (baiaBloccataScarico(baia.doorNumber)) continue;
             const statoBordo = statoBordoBaiaScarico(baia.doorNumber);
             if (statoBordo === "pronta" || statoBordo === "non_attiva" || statoBordo === "shunter") continue;
             const voceBaia = arriviCorrenti[baia.doorNumber];
@@ -3571,6 +3661,7 @@ function eParcheggioScarico(door) {
         try { initIcone(); } catch (e) {}
         try { posizionaBadgeProduttivita(); } catch (e) {}
         try { processaTripDetails(); } catch (e) {}
+        try { bufferManualeBaie.forEach((v, k) => aggiornaBadgeBufferSuDOM(k, true)); } catch (e) {}
 
         let debounceTimer = null;
         const nodiDaControllare = new Set();
@@ -3613,6 +3704,9 @@ function eParcheggioScarico(door) {
         setInterval(() => { try { if (cacheMovimentiPerUnit.size) riarricchisciStoricoConMovimenti([...cacheMovimentiPerUnit.keys()]); } catch (e) {} }, 2 * 60 * 1000);
         setInterval(elaboraCodaVerificaBaie, 4000);
         setInterval(accodaBaieOccupateNonRegistrate, 10000);
+        setInterval(() => { bufferManualeBaie.forEach((v, k) => aggiornaBadgeBufferSuDOM(k, true)); }, 5000);
+        setInterval(sincronizzaBufferManuale, 20000);
+        sincronizzaBufferManuale();
         setInterval(accodaRiverificaRemarksSeAperto, 60000);
         pianificaSincronizzazione(3000);
         setInterval(sincronizzaDati, FIREBASE_SYNC.INTERVALLO_MS);
