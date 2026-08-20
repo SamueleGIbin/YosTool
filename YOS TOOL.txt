@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.10
+// @version      3.12
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -658,7 +658,7 @@
     function baieDelLato(lato) { return (LATI_CHIUDIBILI[lato] || []).map(String); }
     function baieOccupateDelLato(lato) {
         const arrivi = caricaArriviBaia();
-        return baieDelLato(lato).filter((n) => { const v = arrivi[n]; return v && v.unitId; });
+        return baieDelLato(lato).filter((n) => { const v = arrivi[n]; return v && v.unitId && !baiaBloccataScarico(n); });
     }
     function toggleLatoChiuso(lato) {
         if (!LATI_CHIUDIBILI[lato]) return;
@@ -861,7 +861,7 @@
     }
 
     function trovaElementoBaiaPerNumero(doorNumber) {
-        const nodi = document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO);
+        const nodi = nodiBaieScarico();
         for (const numEl of nodi) {
             const span = numEl.querySelector("span");
             if (!span || span.textContent.trim() !== doorNumber) continue;
@@ -1562,6 +1562,16 @@ function eParcheggioScarico(door) {
     }
 
     const DOOR_NUM_SELECTOR_SCARICO = ".door_number, .west_door_number, .east_door_number, .reverse_door_number";
+    let _cacheNodiBaieScarico = null;
+    let _cacheNodiBaieScaricoTs = 0;
+    function nodiBaieScarico() {
+        const ora = Date.now();
+        if (!_cacheNodiBaieScarico || ora - _cacheNodiBaieScaricoTs > 50) {
+            _cacheNodiBaieScarico = document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO);
+            _cacheNodiBaieScaricoTs = ora;
+        }
+        return _cacheNodiBaieScarico;
+    }
     function trovaBaieScaricoOccupate() {
         const arrivi = caricaArriviBaia();
         const risultati = [];
@@ -1577,7 +1587,7 @@ function eParcheggioScarico(door) {
     function trovaBaieOccupateNonRegistrate() {
         const arrivi = caricaArriviBaia();
         const risultati = [];
-        const nodi = document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO);
+        const nodi = nodiBaieScarico();
         nodi.forEach((numEl) => {
             const span = numEl.querySelector("span");
             const doorNumber = span ? span.textContent.trim() : numEl.textContent.trim();
@@ -3149,7 +3159,7 @@ function eParcheggioScarico(door) {
     }
 
     function trovaWrapperBaiaScarico(doorNumber) {
-        const nodi = document.querySelectorAll(DOOR_NUM_SELECTOR_SCARICO);
+        const nodi = nodiBaieScarico();
         for (const el of nodi) {
             const span = el.querySelector("span") || el;
             const testo = (span.textContent || "").trim();
