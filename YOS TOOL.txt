@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.12
+// @version      3.14
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -438,10 +438,10 @@
             if (!remoto || typeof remoto !== "object") return;
             let modificato = false;
             Object.keys(remoto).forEach((k) => {
-                if (!bufferManualeBaie.has(k)) { bufferManualeBaie.set(k, remoto[k]); aggiornaBadgeBufferSuDOM(k, true); modificato = true; }
+                if (!bufferManualeBaie.has(k)) { bufferManualeBaie.set(k, remoto[k]); aggiornaBadgeBufferSuDOM(k, true); aggiornaFlagBufferSessioneInCorso(k); modificato = true; }
             });
             [...bufferManualeBaie.keys()].forEach((k) => {
-                if (!remoto[k]) { bufferManualeBaie.delete(k); aggiornaBadgeBufferSuDOM(k, false); modificato = true; }
+                if (!remoto[k]) { bufferManualeBaie.delete(k); aggiornaBadgeBufferSuDOM(k, false); aggiornaFlagBufferSessioneInCorso(k); modificato = true; }
             });
             if (modificato) { salvaBufferManualeSuStorage(); aggiornaPannelloScaricoSeAperto(); }
         } catch (e) {}
@@ -454,6 +454,7 @@
         else bufferManualeBaie.set(doorNumber, { ts: new Date().toISOString() });
         salvaBufferManualeSuStorage();
         aggiornaBadgeBufferSuDOM(doorNumber, !attivo);
+        aggiornaFlagBufferSessioneInCorso(doorNumber);
         aggiornaPannelloScaricoSeAperto();
         try {
             const token = await otteniIdTokenValido();
@@ -706,8 +707,18 @@
         const attuale = sessioniScaricoInCorso.get(doorNumber);
         if (attuale && attuale.unitId === String(unitId)) return;
         if (attuale) chiudiSessioneScarico(doorNumber, new Date().toISOString());
-        sessioniScaricoInCorso.set(doorNumber, { unitId: String(unitId), lato, inizioIso: orarioIso });
+        sessioniScaricoInCorso.set(doorNumber, { unitId: String(unitId), lato, inizioIso: orarioIso, buffer: baiaBloccataScarico(doorNumber) });
         salvaSessioniInCorsoSuStorage();
+    }
+
+    function aggiornaFlagBufferSessioneInCorso(doorNumber) {
+        const s = sessioniScaricoInCorso.get(doorNumber);
+        if (!s) return;
+        const attivo = baiaBloccataScarico(doorNumber);
+        if (!!s.buffer !== attivo) {
+            s.buffer = attivo;
+            salvaSessioniInCorsoSuStorage();
+        }
     }
 
     function chiudiSessioneScarico(doorNumber, fineIso) {
@@ -721,7 +732,7 @@
         const durataMinuti = Math.round((fine - inizio) / 60000);
         if (durataMinuti <= 0 || durataMinuti > 12 * 60) return;
         const sessioni = caricaSessioniScarico();
-        sessioni.push({ lato: attuale.lato, doorNumber, unitId: attuale.unitId, inizioIso: attuale.inizioIso, fineIso, durataMinuti });
+        sessioni.push({ lato: attuale.lato, doorNumber, unitId: attuale.unitId, inizioIso: attuale.inizioIso, fineIso, durataMinuti, buffer: !!attuale.buffer });
         salvaSessioniScarico(sessioni);
         pianificaSincronizzazione(5000);
     }
@@ -936,6 +947,7 @@
         const testoRemarks = righe["YOS Remark"] || righe["ROCS Remark"] || "";
         if (testoRemarks) cacheRemarksPerBaia.set(doorNumber, { testo: testoRemarks, ts: new Date().toISOString() });
         else cacheRemarksPerBaia.delete(doorNumber);
+        aggiornaFlagBufferSessioneInCorso(doorNumber);
         return true;
     }
 
@@ -1414,6 +1426,7 @@ function eParcheggioScarico(door) {
                     const eraEscluso = remarksEsclusiOrologio(cacheRemarksPerBaia.get(baiaSelezionata));
                     if (testoRemarks) cacheRemarksPerBaia.set(baiaSelezionata, { testo: testoRemarks, ts: new Date().toISOString() });
                     else cacheRemarksPerBaia.delete(baiaSelezionata);
+                    aggiornaFlagBufferSessioneInCorso(baiaSelezionata);
                     if (eraEscluso !== remarksEsclusiOrologio(cacheRemarksPerBaia.get(baiaSelezionata))) {
                         pianificaSincronizzazione(800);
                         aggiornaPannelloScaricoSeAperto();
@@ -1691,7 +1704,7 @@ function eParcheggioScarico(door) {
     }
 
     function salvaArrayConPulizia(chiave, array, chiaveTempoFn) {
-        let arr = array.slice().sort((a, b) => new Date(chiaveTempoFn(b)).getTime() - new Date(chiaveTempoFn(a)).getTime());
+        let arr = array;
         let scartati = false;
         while (arr.length > 0) {
             try {
@@ -1765,16 +1778,14 @@ function eParcheggioScarico(door) {
     }
 
     function tieniUltimiGiorniInteri(records, chiaveTempoFn, numGiorni) {
+        const conChiave = records.map((r) => {
+            const t = chiaveTempoFn(r) ? new Date(chiaveTempoFn(r)).getTime() : NaN;
+            return { r, giorno: isNaN(t) ? null : chiaveGiorno(t) };
+        });
         const giorniPresenti = new Set();
-        records.forEach((r) => {
-            const t = chiaveTempoFn(r) ? new Date(chiaveTempoFn(r)).getTime() : NaN;
-            if (!isNaN(t)) giorniPresenti.add(chiaveGiorno(t));
-        });
+        conChiave.forEach((x) => { if (x.giorno) giorniPresenti.add(x.giorno); });
         const daTenere = new Set([...giorniPresenti].sort().slice(-numGiorni));
-        return records.filter((r) => {
-            const t = chiaveTempoFn(r) ? new Date(chiaveTempoFn(r)).getTime() : NaN;
-            return !isNaN(t) && daTenere.has(chiaveGiorno(t));
-        });
+        return conChiave.filter((x) => x.giorno && daTenere.has(x.giorno)).map((x) => x.r);
     }
 
     function applicaRetentionCondivisa(storico, sessioni) {
@@ -2264,6 +2275,7 @@ function eParcheggioScarico(door) {
                 const remarksUnite = unisciRemarks(remoto.dati.remarksBaie);
                 cacheRemarksPerBaia.clear();
                 remarksUnite.forEach((v, k) => cacheRemarksPerBaia.set(k, v));
+                sessioniScaricoInCorso.forEach((v, doorNumber) => aggiornaFlagBufferSessioneInCorso(doorNumber));
                 const remarksOggetto = {};
                 remarksUnite.forEach((v, k) => { remarksOggetto[k] = v; });
 
@@ -2319,9 +2331,17 @@ function eParcheggioScarico(door) {
         }
     }
 
+    let _ultimoGiornoPuliziaStorico = null;
+    function forsePulisciStoricoVecchio() {
+        const oggiKey = chiaveGiorno(Date.now());
+        if (_ultimoGiornoPuliziaStorico === oggiKey) return;
+        _ultimoGiornoPuliziaStorico = oggiKey;
+        pulisciStoricoVecchio();
+    }
+
     const FINESTRA_DEDUP_STORICO_MS = 5 * 60 * 1000;
     function registraInStoricoReport(doorNumber, unitId, orarioIso) {
-        pulisciStoricoVecchio();
+        forsePulisciStoricoVecchio();
         const storico = caricaStoricoReport();
         const nuovoT = new Date(orarioIso).getTime();
         const esisteGia = storico.some(item => item.doorNumber === doorNumber && item.unitId === unitId
@@ -2496,7 +2516,8 @@ function eParcheggioScarico(door) {
             "Unit ID": s.unitId,
             "Inizio Scarico": s.inizioIso,
             "Fine Scarico": s.fineIso,
-            "Durata (minuti)": s.durataMinuti
+            "Durata (minuti)": s.durataMinuti,
+            "Buffer (escluso da medie)": s.buffer ? "Si" : "No"
         }));
 
         const stat = calcolaStatisticheTurno(dataInizioStr, null, dataFineStr, null);
@@ -2572,6 +2593,7 @@ function eParcheggioScarico(door) {
         const gruppi = new Map();
         ordineLati.forEach((l) => gruppi.set(l, []));
         sessioni.forEach((s) => {
+            if (s.buffer) return;
             if (!s.lato || typeof s.durataMinuti !== "number" || isNaN(s.durataMinuti)) return;
             if (!gruppi.has(s.lato)) gruppi.set(s.lato, []);
             gruppi.get(s.lato).push(s.durataMinuti);
@@ -2590,6 +2612,7 @@ function eParcheggioScarico(door) {
         const sessioni = filtraPerPeriodoConOra(caricaSessioniScarico(), dataInizioStr, oraInizioStr, dataFineStr, oraFineStr, "inizioIso");
         const gruppi = new Map();
         sessioni.forEach((s) => {
+            if (s.buffer) return;
             if (!s.doorNumber || typeof s.durataMinuti !== "number" || isNaN(s.durataMinuti)) return;
             if (!gruppi.has(s.doorNumber)) gruppi.set(s.doorNumber, []);
             gruppi.get(s.doorNumber).push(s.durataMinuti);
