@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.17
+// @version      3.18
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -3732,6 +3732,12 @@
         if (baieLibere.length === 0) {
             const arriviAttuali = caricaArriviBaia();
             baieLibere = elencoBaieScaricoComplete().filter(n => {
+                const voce = arriviAttuali[n];
+                return !voce || !voce.unitId;
+            });
+        } else {
+            const arriviAttuali = caricaArriviBaia();
+            baieLibere = baieLibere.filter(n => {
                 const voce = arriviAttuali[n];
                 return !voce || !voce.unitId;
             });
