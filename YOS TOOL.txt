@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.18
+// @version      3.23
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -16,6 +16,7 @@
 // @updateURL    https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL.txt
 // @downloadURL  https://raw.githubusercontent.com/SamueleGibin/YosTool/main/YOS%20TOOL.txt
 // ==/UserScript==
+
 
 (function() {
     "use strict";
@@ -539,9 +540,9 @@
     async function toggleBufferManuale(doorNumber) {
         if (!doorNumber) return;
         const attivo = bufferManualeBaie.has(doorNumber);
-        if (attivo) bufferManualeBaie.delete(doorNumber); else bufferManualeBaie.set(doorNumber, {
+        if (attivo) { bufferManualeBaie.delete(doorNumber); } else { bufferManualeBaie.set(doorNumber, {
             ts: (new Date).toISOString()
-        });
+        }); }
         salvaBufferManualeSuStorage();
         aggiornaBadgeBufferSuDOM(doorNumber, !attivo);
         aggiornaFlagBufferSessioneInCorso(doorNumber);
@@ -549,9 +550,9 @@
         try {
             const token = await otteniIdTokenValido();
             const url = FIREBASE_SYNC.BASE_URL + "/bufferManuale/" + doorNumber + ".json?auth=" + token;
-            if (attivo) await fetch(url, {
+            if (attivo) { await fetch(url, {
                 method: "DELETE"
-            }); else await fetch(url, {
+            }); } else { await fetch(url, {
                 method: "PUT",
                 headers: {
                     "Content-Type": "application/json"
@@ -559,7 +560,7 @@
                 body: JSON.stringify({
                     ts: (new Date).toISOString()
                 })
-            });
+            }); }
         } catch (e) {}
     }
     const STORAGE_KEY_CACHE_MOVIMENTI = "tnt_cache_movimenti_per_unit_v1";
@@ -1101,10 +1102,10 @@
         rimuoviHoverReale(wrapper);
         if (!righe) return false;
         const testoRemarks = righe["YOS Remark"] || righe["ROCS Remark"] || "";
-        if (testoRemarks) cacheRemarksPerBaia.set(doorNumber, {
+        if (testoRemarks) { cacheRemarksPerBaia.set(doorNumber, {
             testo: testoRemarks,
             ts: (new Date).toISOString()
-        }); else cacheRemarksPerBaia.delete(doorNumber);
+        }); } else { cacheRemarksPerBaia.delete(doorNumber); }
         aggiornaFlagBufferSessioneInCorso(doorNumber);
         return true;
     }
@@ -1292,13 +1293,13 @@
         turno: "Primo Shift",
         cutoffOre: 23,
         cutoffMin: 45,
-        codici: [ "HNJ", "DNG*", "DFT*", "BCN", "ECL", "LUG" ]
+        codici: [ "HNJ", "DNG*", "DFT*", "BCN", "ECL" ]
     }, {
         nome: "Filiali per Nord Mix Italia",
         turno: "Primo Shift",
         cutoffOre: 23,
         cutoffMin: 45,
-        codici: [ "CUF", "OS3", "IBU", "IPO", "ICM", "RNV", "ILJ", "QVA", "QAL", "BEA", "BRG", "MZ1", "GOA", "OSO", "B8Y", "M1S", "TO1", "ZD1", "MIL" ]
+        codici: [ "CUF", "OS3", "IBU", "IPO", "ICM", "RNV", "ILJ", "QVA", "QAL", "BEA", "BRG", "MZ1", "GOA", "OSO", "LUG", "B8Y", "M1S", "TO1", "ZD1", "MIL" ]
     }, {
         nome: "Filiali per Export",
         turno: "Secondo Shift",
@@ -1345,7 +1346,7 @@
     const MARGINE_MINIMO_DOMESTICO_MINUTI = 60;
     const MARGINE_MINIMO_INTERNAZIONALE_MINUTI = 150;
     const ORARIO_CHIUSURA_SABATO_MINUTI = 2 * 60;
-    const ORARIO_RIAPERTURA_DOMENICA_MINUTI = 21 * 60 + 30;
+    const ORARIO_RIAPERTURA_DOMENICA_MINUTI = 20 * 60 + 30;
     function calcolaInizioTurnoCorrente(riferimento) {
         const now = riferimento || new Date;
         const giorno = now.getDay();
@@ -1362,6 +1363,7 @@
             if (minutiOggi >= POMERIGGIO_MIN) return dataOra(0, 16, 0);
             return dataOra(-1, 16, 0);
         }
+        if (giorno === 6) return dataOra(-1, 16, 0);
         if (minutiOggi >= POMERIGGIO_MIN) return dataOra(0, 16, 0);
         return dataOra(0, 0, 0);
     }
@@ -1494,22 +1496,6 @@
         }
         return "Freight";
     }
-    function elencoSlotCutoffUnici() {
-        const visti = new Set;
-        const slot = [];
-        CATEGORIE.forEach(c => {
-            const chiave = c.cutoffOre + ":" + c.cutoffMin;
-            if (!visti.has(chiave)) {
-                visti.add(chiave);
-                slot.push({
-                    ore: c.cutoffOre,
-                    min: c.cutoffMin
-                });
-            }
-        });
-        return slot;
-    }
-    const SLOT_CUTOFF_UNICI = elencoSlotCutoffUnici();
     function eOrarioDiChiusura(data) {
         const giorno = data.getDay();
         const minutiGiorno = data.getHours() * 60 + data.getMinutes();
@@ -1517,14 +1503,20 @@
         if (giorno === 0 && minutiGiorno < ORARIO_RIAPERTURA_DOMENICA_MINUTI) return true;
         return false;
     }
-    function trovaProssimoCutoffConMargine(cutoffBase, arrivoPortaReale, margineMinimo) {
+    function prossimaAperturaSeChiuso(data) {
+        if (!eOrarioDiChiusura(data)) return null;
+        const giorno = data.getDay();
+        const offsetGiorni = giorno === 6 ? 1 : 0;
+        return new Date(data.getFullYear(), data.getMonth(), data.getDate() + offsetGiorni, Math.floor(ORARIO_RIAPERTURA_DOMENICA_MINUTI / 60), ORARIO_RIAPERTURA_DOMENICA_MINUTI % 60, 0, 0);
+    }
+    function trovaProssimoCutoffConMargine(cat, cutoffBase, arrivoPortaReale, margineMinimo) {
         const ancora = arrivoPortaReale && !isNaN(arrivoPortaReale.getTime()) && arrivoPortaReale.getTime() > cutoffBase.getTime() ? arrivoPortaReale : cutoffBase;
         const candidati = [];
         for (let offset = 0; offset <= 5; offset++) {
-            SLOT_CUTOFF_UNICI.forEach(slot => {
-                const d = new Date(ancora.getFullYear(), ancora.getMonth(), ancora.getDate() + offset, slot.ore, slot.min, 0, 0);
-                if (d.getTime() > cutoffBase.getTime() && !eOrarioDiChiusura(d)) candidati.push(d);
-            });
+            let d = new Date(ancora.getFullYear(), ancora.getMonth(), ancora.getDate() + offset, cat.cutoffOre, cat.cutoffMin, 0, 0);
+            const riapertura = prossimaAperturaSeChiuso(d);
+            if (riapertura) d = riapertura;
+            if (d.getTime() > cutoffBase.getTime()) candidati.push(d);
         }
         candidati.sort((a, b) => a.getTime() - b.getTime());
         for (const d of candidati) {
@@ -1540,8 +1532,10 @@
         const choices = [];
         candidati.forEach(cat => {
             for (let offset = -1; offset <= 5; offset++) {
-                const d = new Date(arrivo.getFullYear(), arrivo.getMonth(), arrivo.getDate() + offset, cat.cutoffOre, cat.cutoffMin, 0, 0);
-                if (d.getTime() >= arrivo.getTime() && !eOrarioDiChiusura(d)) {
+                let d = new Date(arrivo.getFullYear(), arrivo.getMonth(), arrivo.getDate() + offset, cat.cutoffOre, cat.cutoffMin, 0, 0);
+                const riapertura = prossimaAperturaSeChiuso(d);
+                if (riapertura) d = riapertura;
+                if (d.getTime() >= arrivo.getTime()) {
                     choices.push({
                         cat: cat,
                         cutoffDate: d
@@ -1569,7 +1563,7 @@
             const margineReale = (risultato.cutoffDate.getTime() - arrivoPortaReale.getTime()) / 6e4;
             if (margineReale < margineMinimo) {
                 const cutoffOriginaleGiaPassato = risultato.cutoffDate.getTime() <= arrivoPortaReale.getTime();
-                const nuovoCutoff = trovaProssimoCutoffConMargine(risultato.cutoffDate, arrivoPortaReale, margineMinimo);
+                const nuovoCutoff = trovaProssimoCutoffConMargine(risultato.cat, risultato.cutoffDate, arrivoPortaReale, margineMinimo);
                 if (nuovoCutoff) {
                     risultato = cutoffOriginaleGiaPassato ? {
                         cat: risultato.cat,
@@ -1688,10 +1682,10 @@
                     const remarksEl = trovaValorePerChiave(sezione, "YOS Remarks") || trovaValorePerChiave(sezione, "Arrival Remarks");
                     const testoRemarks = remarksEl ? remarksEl.dataset && remarksEl.dataset.tntCode ? remarksEl.dataset.tntCode : remarksEl.textContent.trim() : "";
                     const eraEscluso = remarksEsclusiOrologio(cacheRemarksPerBaia.get(baiaSelezionata));
-                    if (testoRemarks) cacheRemarksPerBaia.set(baiaSelezionata, {
+                    if (testoRemarks) { cacheRemarksPerBaia.set(baiaSelezionata, {
                         testo: testoRemarks,
                         ts: (new Date).toISOString()
-                    }); else cacheRemarksPerBaia.delete(baiaSelezionata);
+                    }); } else { cacheRemarksPerBaia.delete(baiaSelezionata); }
                     aggiornaFlagBufferSessioneInCorso(baiaSelezionata);
                     if (eraEscluso !== remarksEsclusiOrologio(cacheRemarksPerBaia.get(baiaSelezionata))) {
                         pianificaSincronizzazione(800);
@@ -1892,6 +1886,7 @@
     }
     function accodaBaieOccupateNonRegistrate() {
         trovaBaieOccupateNonRegistrate().forEach(doorNumber => {
+            if (baiaBloccataScarico(doorNumber)) return;
             if (codaVerificaBaie.some(v => v.doorNumber === doorNumber && v.registraMancante)) return;
             codaVerificaBaie.push({
                 doorNumber: doorNumber,
@@ -2164,7 +2159,7 @@
         } catch (e) {
             dati = null;
         }
-        if (!dati || typeof dati !== "object") dati = {
+        if (!dati || typeof dati !== "object") { dati = {
             versione: VERSIONE_DATI,
             storico: [],
             sessioni: [],
@@ -2172,7 +2167,7 @@
             remarksBaie: {},
             colliTotali: null,
             colliStorico: []
-        };
+        }; }
         if (!Array.isArray(dati.storico)) dati.storico = [];
         if (!Array.isArray(dati.sessioni)) dati.sessioni = [];
         if (!dati.presenze || typeof dati.presenze !== "object") dati.presenze = {};
@@ -2366,9 +2361,19 @@
                 valore = await recuperaColliDaSplunk();
             } catch (primoErrore) {
                 if (/quota/i.test(primoErrore.message || "")) {
-                    const csrfInfo = await ottieniCsrfSplunk();
-                    await pulisciJobSplunkVecchi(csrfInfo);
-                    valore = await recuperaColliDaSplunk();
+                    let ultimoErroreQuota = primoErrore;
+                    let riuscito = false;
+                    for (let tentativo = 0; tentativo < 3 && !riuscito; tentativo++) {
+                        try {
+                            const csrfInfo = await ottieniCsrfSplunk();
+                            await pulisciJobSplunkVecchi(csrfInfo);
+                            valore = await recuperaColliDaSplunk();
+                            riuscito = true;
+                        } catch (erroreTentativo) {
+                            ultimoErroreQuota = erroreTentativo;
+                        }
+                    }
+                    if (!riuscito) throw ultimoErroreQuota;
                 } else {
                     window.open(costruisciUrlSplunk(), "_blank");
                     await new Promise(r => setTimeout(r, 6e3));
@@ -2411,7 +2416,7 @@
             const d = new Date(locale.aggiornatoIl);
             aggiornatoTxt = "Colli aggiornati alle ore " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") + " del " + String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0");
         }
-        body.innerHTML = '<div class="tnt-card"><div class="tnt-card-title">' + statoTxt + "</div>" + '<div class="tnt-card-sub">' + aggiornatoTxt + "</div>" + '<div class="tnt-card-sub">Dati dalle ore ' + hhI + ":" + mmI + "</div>" + "</div>" + (ultimoErroreColli ? '<div style="font-size:11px;color:#E24B4A;margin-bottom:8px;">Aggiornamento automatico non riuscito: ' + escapeHtml(ultimoErroreColli) + "</div>" : "") + '<button id="tnt-colli-aggiorna-ora" class="tnt-btn-primary">Aggiorna ora</button>' + '<label style="display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;"><input type="checkbox" id="tnt-colli-auto" ' + (imp.auto ? "checked" : "") + "> Aggiornamento automatico ogni 30 min</label>" + '<label style="display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;"><input type="checkbox" id="tnt-colli-manuale" ' + (imp.manuale ? "checked" : "") + "> Imposta a mano da che ora prendere i dati</label>" + '<div style="display:flex;gap:6px;margin:0 0 10px;">' + '<input type="date" id="tnt-colli-data-manuale" value="' + (imp.dataManuale || (new Date).toISOString().slice(0, 10)) + '" ' + (imp.manuale ? "" : "disabled") + ' style="flex:1;box-sizing:border-box;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;">' + '<input type="time" id="tnt-colli-orario-manuale" value="' + imp.orarioManuale + '" ' + (imp.manuale ? "" : "disabled") + ' style="flex:1;box-sizing:border-box;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;">' + "</div>" + '<a href="' + costruisciUrlSplunk() + '" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8B5CF6;margin:4px 0 10px;">Apri la stessa ricerca su Splunk &#8599;</a>';
+        body.innerHTML = "<div class=\"tnt-card\"><div class=\"tnt-card-title\">" + statoTxt + "</div><div class=\"tnt-card-sub\">" + aggiornatoTxt + "</div><div class=\"tnt-card-sub\">Dati dalle ore " + hhI + ":" + mmI + "</div></div>" + (ultimoErroreColli ? '<div style="font-size:11px;color:#E24B4A;margin-bottom:8px;">Aggiornamento automatico non riuscito: ' + escapeHtml(ultimoErroreColli) + "</div>" : "") + "<button id=\"tnt-colli-aggiorna-ora\" class=\"tnt-btn-primary\">Aggiorna ora</button><label style=\"display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;\"><input type=\"checkbox\" id=\"tnt-colli-auto\" " + (imp.auto ? "checked" : "") + "> Aggiornamento automatico ogni 30 min</label><label style=\"display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;\"><input type=\"checkbox\" id=\"tnt-colli-manuale\" " + (imp.manuale ? "checked" : "") + "> Imposta a mano da che ora prendere i dati</label><div style=\"display:flex;gap:6px;margin:0 0 10px;\"><input type=\"date\" id=\"tnt-colli-data-manuale\" value=\"" + (imp.dataManuale || (new Date).toISOString().slice(0, 10)) + "\" " + (imp.manuale ? "" : "disabled") + " style=\"flex:1;box-sizing:border-box;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;\"><input type=\"time\" id=\"tnt-colli-orario-manuale\" value=\"" + imp.orarioManuale + "\" " + (imp.manuale ? "" : "disabled") + " style=\"flex:1;box-sizing:border-box;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;\"></div><a href=\"" + costruisciUrlSplunk() + "\" target=\"_blank\" rel=\"noopener\" style=\"display:block;font-size:12px;color:#8B5CF6;margin:4px 0 10px;\">Apri la stessa ricerca su Splunk &#8599;</a>";
         document.getElementById("tnt-colli-aggiorna-ora").addEventListener("click", e => {
             e.stopPropagation();
             aggiornaColliAutomatico();
@@ -2445,7 +2450,7 @@
         const wrapper = document.createElement("div");
         wrapper.id = "tnt-top-badges";
         wrapper.style.cssText = "position:fixed;top:6px;left:50%;transform:translateX(-50%);z-index:999998;display:flex;align-items:center;gap:8px;font-family:Roboto,sans-serif;";
-        wrapper.innerHTML = '<div id="tnt-badge-colli" title="Productivity - colli lavorati" style="display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);cursor:pointer;">' + '<span style="color:#8B5CF6;">&#9679;</span><span>Productivity</span>' + "</div>" + '<div id="tnt-badge-sync" style="display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);">' + '<span id="tnt-badge-dot" style="width:8px;height:8px;border-radius:50%;background:#777;flex-shrink:0;"></span><span id="tnt-badge-testo">Sync...</span>' + "</div>";
+        wrapper.innerHTML = "<div id=\"tnt-badge-colli\" title=\"Productivity - colli lavorati\" style=\"display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);cursor:pointer;\"><span style=\"color:#8B5CF6;\">&#9679;</span><span>Productivity</span></div><div id=\"tnt-badge-sync\" style=\"display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);\"><span id=\"tnt-badge-dot\" style=\"width:8px;height:8px;border-radius:50%;background:#777;flex-shrink:0;\"></span><span id=\"tnt-badge-testo\">Sync...</span></div>";
         document.body.appendChild(wrapper);
         const btnColli = document.getElementById("tnt-badge-colli");
         const panelColli = creaPannello("tnt-colli-panel", "Productivity - Colli turno", "#8B5CF6");
@@ -2860,16 +2865,16 @@
                 Valore: Math.round(collis.mediaOraria),
                 Campioni: ""
             });
-            if (collis.turnoPrecedente) righeStat.push({
+            if (collis.turnoPrecedente) { righeStat.push({
                 Indicatore: "Colli turno precedente (" + collis.turnoPrecedente.tipoTurno + ")",
                 Valore: collis.turnoPrecedente.valore,
                 Campioni: ""
-            });
-            if (collis.turnoStessoIeri) righeStat.push({
+            }); }
+            if (collis.turnoStessoIeri) { righeStat.push({
                 Indicatore: "Colli stesso turno giorno precedente",
                 Valore: collis.turnoStessoIeri.valore,
                 Campioni: ""
-            });
+            }); }
         }
         const righeStatBaia = stat.perBaia.map(r => ({
             Baia: r.doorNumber,
@@ -2913,10 +2918,10 @@
             const minuti = (primaBaiaDopo.t - primoParcheggio.t) / 6e4;
             if (minuti >= 0 && minuti < 24 * 60) attese.push(minuti);
         });
-        if (attese.length === 0) return {
+        if (attese.length === 0) { return {
             mediaMinuti: null,
             campioni: 0
-        };
+        }; }
         const media = attese.reduce((s, v) => s + v, 0) / attese.length;
         return {
             mediaMinuti: Math.round(media),
@@ -3012,10 +3017,10 @@
         storico.forEach(r => {
             const chiave = chiaveFn(r);
             if (!chiave || chiave === "N/A" || chiave === "N/D") return;
-            if (!gruppi.has(chiave)) gruppi.set(chiave, {
+            if (!gruppi.has(chiave)) { gruppi.set(chiave, {
                 totale: 0,
                 ritardati: 0
-            });
+            }); }
             const g = gruppi.get(chiave);
             g.totale++;
             if (r.ritardoFlag === "Si") g.ritardati++;
@@ -3064,7 +3069,7 @@
             return;
         }
         const oreTxt = s.oreTrascorse < 1 ? Math.round(s.oreTrascorse * 60) + " min" : s.oreTrascorse.toFixed(1) + " h";
-        let html = '<div class="tnt-card tnt-card-ambra">' + '<div class="tnt-card-row"><div class="tnt-card-title">' + s.attuale.valore.toLocaleString("it-IT") + ' colli</div><div class="tnt-badge">' + Math.round(s.mediaOraria) + "/h</div></div>" + '<div class="tnt-card-sub">Turno ' + s.tipoAttuale + " in corso da " + oreTxt + "</div>";
+        let html = "<div class=\"tnt-card tnt-card-ambra\"><div class=\"tnt-card-row\"><div class=\"tnt-card-title\">" + s.attuale.valore.toLocaleString("it-IT") + " colli</div><div class=\"tnt-badge\">" + Math.round(s.mediaOraria) + "/h</div></div><div class=\"tnt-card-sub\">Turno " + s.tipoAttuale + " in corso da " + oreTxt + "</div>";
         if (s.turnoPrecedente) {
             const d = s.attuale.valore - s.turnoPrecedente.valore;
             html += '<div class="tnt-card-sub">Turno precedente (' + s.turnoPrecedente.tipoTurno + "): " + s.turnoPrecedente.valore.toLocaleString("it-IT") + " colli (" + (d >= 0 ? "+" : "") + d.toLocaleString("it-IT") + ")</div>";
@@ -3093,7 +3098,7 @@
         const dataMin = dataMinimaDisponibile();
         const attrMin = dataMin ? ' min="' + dataMin + '"' : "";
         const etichettaMin = dataMin ? '<div class="tnt-footnote">Dati disponibili dal ' + dataMin.split("-").reverse().join("/") + "</div>" : '<div class="tnt-footnote">Nessun dato ancora disponibile</div>';
-        panelBody.innerHTML = '<div class="tnt-group-label">Colli totali turno (da Splunk)</div>' + '<div id="tnt-stat-colli"></div>' + etichettaMin + "<label>Dal giorno</label>" + '<div class="tnt-riga-data-ora"><input type="date" id="tnt-stat-data-inizio" value="' + oggi + '"' + attrMin + ' max="' + oggi + '">' + '<input type="time" id="tnt-stat-ora-inizio" value="00:00"></div>' + "<label>Al giorno</label>" + '<div class="tnt-riga-data-ora"><input type="date" id="tnt-stat-data-fine" value="' + oggi + '"' + attrMin + ' max="' + oggi + '">' + '<input type="time" id="tnt-stat-ora-fine" value="23:59"></div>' + '<button id="tnt-stat-btn-calcola" class="tnt-btn-primary">Calcola statistiche</button>' + '<button id="tnt-stat-btn-tutto" class="tnt-btn-secondary">Statistiche su tutto lo storico</button>' + '<div id="tnt-stat-risultati"></div>';
+        panelBody.innerHTML = "<div class=\"tnt-group-label\">Colli totali turno (da Splunk)</div><div id=\"tnt-stat-colli\"></div>" + etichettaMin + "<label>Dal giorno</label><div class=\"tnt-riga-data-ora\"><input type=\"date\" id=\"tnt-stat-data-inizio\" value=\"" + oggi + "\"" + attrMin + " max=\"" + oggi + "\"><input type=\"time\" id=\"tnt-stat-ora-inizio\" value=\"00:00\"></div><label>Al giorno</label><div class=\"tnt-riga-data-ora\"><input type=\"date\" id=\"tnt-stat-data-fine\" value=\"" + oggi + "\"" + attrMin + " max=\"" + oggi + "\"><input type=\"time\" id=\"tnt-stat-ora-fine\" value=\"23:59\"></div><button id=\"tnt-stat-btn-calcola\" class=\"tnt-btn-primary\">Calcola statistiche</button><button id=\"tnt-stat-btn-tutto\" class=\"tnt-btn-secondary\">Statistiche su tutto lo storico</button><div id=\"tnt-stat-risultati\"></div>";
         function esegui(dataInizio, oraInizio, dataFine, oraFine) {
             const stat = calcolaStatisticheTurno(dataInizio, oraInizio, dataFine, oraFine);
             const cont = document.getElementById("tnt-stat-risultati");
@@ -3108,7 +3113,7 @@
                 if (stat.trend && stat.trend.attesaParcheggioMediaMinuti !== null && stat.trend.attesaParcheggioMediaMinuti !== undefined) {
                     deltaParcheggioHtml = rigaDeltaTrend(stat.attesaParcheggio.mediaMinuti - stat.trend.attesaParcheggioMediaMinuti, stat.trend.giorni, stat.trend.attesaParcheggioMediaMinuti);
                 }
-                html += '<div class="tnt-card"><div class="tnt-card-title">' + Math.floor(stat.attesaParcheggio.mediaMinuti / 60) + "h " + stat.attesaParcheggio.mediaMinuti % 60 + "m" + '</div><div class="tnt-card-sub">su ' + stat.attesaParcheggio.campioni + " camion tracciati parcheggio&rarr;baia</div>" + deltaParcheggioHtml + "</div>";
+                html += "<div class=\"tnt-card\"><div class=\"tnt-card-title\">" + Math.floor(stat.attesaParcheggio.mediaMinuti / 60) + "h " + stat.attesaParcheggio.mediaMinuti % 60 + "m</div><div class=\"tnt-card-sub\">su " + stat.attesaParcheggio.campioni + " camion tracciati parcheggio&rarr;baia</div>" + deltaParcheggioHtml + "</div>";
             } else {
                 html += '<div class="tnt-empty">Nessun camion tracciato parcheggio&rarr;baia nel periodo</div>';
             }
@@ -3201,18 +3206,18 @@
     }
     function renderPannelloTempisticaParcel(panelBody) {
         let html = '<input type="text" id="tnt-parcel-ricerca" placeholder="Cerca codice o filiale...">';
-        html += '<div class="tnt-card" style="opacity:.85;font-size:12px;">' + '<span style="color:#FF9F43;font-weight:600;">&#9679; domestiche</span> &nbsp; ' + '<span style="color:#C77DFF;font-weight:600;">&#9679; internazionali</span>' + "</div>";
+        html += "<div class=\"tnt-card\" style=\"opacity:.85;font-size:12px;\"><span style=\"color:#FF9F43;font-weight:600;\">&#9679; domestiche</span> &nbsp; <span style=\"color:#C77DFF;font-weight:600;\">&#9679; internazionali</span></div>";
         DATI_TEMPISTICA_PARCEL.forEach(turno => {
             html += '<div class="tnt-group-label">' + turno.turno + "</div>";
             ordinaGruppiPerCutoff(turno.gruppi).forEach(g => {
-                html += '<div class="tnt-card tnt-parcel-riga" data-ricerca="' + escapeHtml((g.categoria + " " + g.codici).toLowerCase()) + '">' + '<div class="tnt-card-row">' + '<span class="tnt-card-title">' + escapeHtml(g.categoria) + "</span>" + '<span class="tnt-badge" style="background:#3b2c66;color:#D9C6FF;">Cutoff ' + g.scadenza + "</span>" + "</div>" + '<div class="tnt-card-sub">Arrivo previsto ' + g.arrivo + (g.codici ? "<br>" + renderCodiciColorati(g.codici) : "") + "</div>" + "</div>";
+                html += "<div class=\"tnt-card tnt-parcel-riga\" data-ricerca=\"" + escapeHtml((g.categoria + " " + g.codici).toLowerCase()) + "\"><div class=\"tnt-card-row\"><span class=\"tnt-card-title\">" + escapeHtml(g.categoria) + "</span><span class=\"tnt-badge\" style=\"background:#3b2c66;color:#D9C6FF;\">Cutoff " + g.scadenza + "</span></div><div class=\"tnt-card-sub\">Arrivo previsto " + g.arrivo + (g.codici ? "<br>" + renderCodiciColorati(g.codici) : "") + "</div></div>";
             });
         });
         html += '<div class="tnt-group-label">Tabella DEST &rarr; localit&agrave;</div>';
         html += '<div id="tnt-parcel-dest-lista">';
         TABELLA_DEST_PARCEL.forEach(d => {
             const colore = eCodiceInternazionale(d[0]) ? "#C77DFF" : "#FF9F43";
-            html += '<div class="tnt-dest-row tnt-parcel-riga" data-ricerca="' + escapeHtml((d[0] + " " + d[1]).toLowerCase()) + '">' + '<span class="tnt-dest-codice" style="color:' + colore + ';font-weight:600;">' + escapeHtml(d[0]) + "</span>" + '<span class="tnt-dest-nome">' + escapeHtml(d[1]) + "</span>" + "</div>";
+            html += "<div class=\"tnt-dest-row tnt-parcel-riga\" data-ricerca=\"" + escapeHtml((d[0] + " " + d[1]).toLowerCase()) + "\"><span class=\"tnt-dest-codice\" style=\"color:" + colore + ";font-weight:600;\">" + escapeHtml(d[0]) + "</span><span class=\"tnt-dest-nome\">" + escapeHtml(d[1]) + "</span></div>";
         });
         html += "</div>";
         panelBody.innerHTML = html;
@@ -3230,7 +3235,7 @@
         const dataMin = dataMinimaDisponibile();
         const attrMin = dataMin ? ' min="' + dataMin + '"' : "";
         const etichettaMin = dataMin ? '<div class="tnt-footnote">Dati disponibili dal ' + dataMin.split("-").reverse().join("/") + "</div>" : '<div class="tnt-footnote">Nessun dato ancora disponibile</div>';
-        panelBody.innerHTML = etichettaMin + "<label>Dal giorno</label>" + '<input type="date" id="tnt-report-data-inizio" value="' + oggi + '"' + attrMin + ' max="' + oggi + '">' + "<label>Al giorno</label>" + '<input type="date" id="tnt-report-data-fine" value="' + oggi + '"' + attrMin + ' max="' + oggi + '">' + '<button id="tnt-report-btn-scarica" class="tnt-btn-primary">Scarica Excel periodo</button>' + '<button id="tnt-report-btn-tutto" class="tnt-btn-secondary">Scarica tutto lo storico</button>';
+        panelBody.innerHTML = etichettaMin + "<label>Dal giorno</label><input type=\"date\" id=\"tnt-report-data-inizio\" value=\"" + oggi + "\"" + attrMin + " max=\"" + oggi + "\"><label>Al giorno</label><input type=\"date\" id=\"tnt-report-data-fine\" value=\"" + oggi + "\"" + attrMin + " max=\"" + oggi + "\"><button id=\"tnt-report-btn-scarica\" class=\"tnt-btn-primary\">Scarica Excel periodo</button><button id=\"tnt-report-btn-tutto\" class=\"tnt-btn-secondary\">Scarica tutto lo storico</button>";
         document.getElementById("tnt-report-btn-scarica").addEventListener("click", e => {
             e.stopPropagation();
             const dataInizio = document.getElementById("tnt-report-data-inizio").value;
@@ -3337,10 +3342,10 @@
                 n: "Movement ID",
                 v: schedTripBL || "—"
             } ];
-            let html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">' + '<span style="color:#E24B4A;font-weight:700;font-size:15px;">⚠ Bad Loading</span>' + '<span id="tnt-bl-close" style="cursor:pointer;color:#c7c7cc;font-size:20px;line-height:1;padding:2px 6px;">×</span>' + "</div>";
+            let html = "<div style=\"display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;\"><span style=\"color:#E24B4A;font-weight:700;font-size:15px;\">⚠ Bad Loading</span><span id=\"tnt-bl-close\" style=\"cursor:pointer;color:#c7c7cc;font-size:20px;line-height:1;padding:2px 6px;\">×</span></div>";
             campi.forEach(function(campo) {
                 const valCopia = campo.v.split(" — ")[0];
-                html += '<div style="margin-bottom:10px;">' + '<div style="color:#8e8e93;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;">' + escapeHtml(campo.n) + "</div>" + '<div style="display:flex;align-items:center;gap:8px;">' + '<span style="background:#2e2e31;color:#fff;font-weight:700;font-size:13px;padding:5px 10px;border-radius:6px;flex:1;">' + escapeHtml(campo.v) + "</span>" + '<button data-copy="' + escapeHtml(valCopia) + '" style="background:#3a3a3c;color:#d5d5da;border:none;border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;white-space:nowrap;">Copia</button>' + "</div></div>";
+                html += "<div style=\"margin-bottom:10px;\"><div style=\"color:#8e8e93;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;\">" + escapeHtml(campo.n) + "</div><div style=\"display:flex;align-items:center;gap:8px;\"><span style=\"background:#2e2e31;color:#fff;font-weight:700;font-size:13px;padding:5px 10px;border-radius:6px;flex:1;\">" + escapeHtml(campo.v) + "</span><button data-copy=\"" + escapeHtml(valCopia) + "\" style=\"background:#3a3a3c;color:#d5d5da;border:none;border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;white-space:nowrap;\">Copia</button></div></div>";
             });
             html += '<div style="margin-top:6px;padding:8px 10px;background:#2c2c2e;border-radius:6px;color:#8e8e93;font-size:11px;">Campi 7, 8 e 9 si compilano manualmente nel form.</div>';
             html += '<button id="tnt-bl-apri" style="margin-top:14px;width:100%;background:#E24B4A;color:#fff;border:none;border-radius:8px;padding:10px;font-size:13px;font-weight:700;cursor:pointer;">Apri form nel browser</button>';
@@ -3479,21 +3484,21 @@
         function dataOra(offsetGiorni, h, m) {
             return new Date(y, mo, d + offsetGiorni, h, m, 0, 0);
         }
-        if (minutiOra >= 21 * 60 + 30) return {
+        if (minutiOra >= 21 * 60 + 30) { return {
             inizio: dataOra(0, 21, 30),
             fine: dataOra(1, 1, 0),
             nome: "Pomeriggio"
-        };
-        if (minutiOra < 60) return {
+        }; }
+        if (minutiOra < 60) { return {
             inizio: dataOra(-1, 21, 30),
             fine: dataOra(0, 1, 0),
             nome: "Pomeriggio"
-        };
-        if (minutiOra < 9 * 60) return {
+        }; }
+        if (minutiOra < 9 * 60) { return {
             inizio: dataOra(0, 1, 0),
             fine: dataOra(0, 9, 0),
             nome: "Notte"
-        };
+        }; }
         return {
             inizio: dataOra(0, 21, 30),
             fine: dataOra(1, 1, 0),
@@ -3533,10 +3538,10 @@
                 }
             }
             const cutoffRes = calcolaCutoffPerCodice(codiceOrigine, arrivo, arrivoPortaReale);
-            if (cutoffRes) return {
+            if (cutoffRes) { return {
                 cutoff: cutoffRes,
                 codice: codiceOrigine
-            };
+            }; }
         }
         return null;
     }
@@ -3584,12 +3589,12 @@
             const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
             const dataChiave = risultato.cutoffDate.getFullYear() + "-" + String(risultato.cutoffDate.getMonth() + 1).padStart(2, "0") + "-" + String(risultato.cutoffDate.getDate()).padStart(2, "0");
             const chiave = risultato.cat.nome + "|" + dataChiave + " " + hh + ":" + mm;
-            if (!gruppi.has(chiave)) gruppi.set(chiave, {
+            if (!gruppi.has(chiave)) { gruppi.set(chiave, {
                 nome: risultato.cat.nome,
                 turno: risultato.cat.turno,
                 orario: risultato.cutoffDate,
                 baie: []
-            });
+            }); }
             gruppi.get(chiave).baie.push(risultato.ritardo ? infoBaia + "*" : infoBaia);
         }
         const baie = trovaBaieScaricoOccupate();
@@ -3603,10 +3608,10 @@
             let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
             if (!infoCutoff) {
                 const cutoffCachato = leggiCacheCutoffBaia(baia.doorNumber);
-                if (cutoffCachato) infoCutoff = {
+                if (cutoffCachato) { infoCutoff = {
                     cutoff: cutoffCachato,
                     codice: null
-                };
+                }; }
             }
             if (!infoCutoff && baiaSelezionata === baia.doorNumber) {
                 assicuraTabInbound();
@@ -3700,10 +3705,10 @@
             voci.forEach(([chiave, info]) => {
                 const diffMinuti = (info.orario.getTime() - ora.getTime()) / 6e4;
                 const fascia = fasce.find(f => f.test(diffMinuti));
-                if (!bucket.has(fascia.chiave)) bucket.set(fascia.chiave, {
+                if (!bucket.has(fascia.chiave)) { bucket.set(fascia.chiave, {
                     fascia: fascia,
                     voci: []
-                });
+                }); }
                 bucket.get(fascia.chiave).voci.push(info);
             });
             let presenteAsterisco = false;
@@ -3718,7 +3723,7 @@
                     const etichettaOrario = stessoGiornoDiOggi ? hh + ":" + mm : String(info.orario.getDate()).padStart(2, "0") + "/" + String(info.orario.getMonth() + 1).padStart(2, "0") + " " + hh + ":" + mm;
                     const listaBaie = info.baie.filter(Boolean).sort(confrontaBaie).join(", ");
                     if (listaBaie.indexOf("*") !== -1) presenteAsterisco = true;
-                    html += '<div class="tnt-card ' + f.classe + '">' + '<div class="tnt-card-row">' + '<span class="tnt-card-title">' + info.nome + " (" + info.baie.length + ")</span>" + '<span class="tnt-badge">' + etichettaOrario + "</span>" + "</div>" + '<div class="tnt-card-sub">Baie: ' + listaBaie + "</div>" + "</div>";
+                    html += "<div class=\"tnt-card " + f.classe + "\"><div class=\"tnt-card-row\"><span class=\"tnt-card-title\">" + info.nome + " (" + info.baie.length + ")</span><span class=\"tnt-badge\">" + etichettaOrario + "</span></div><div class=\"tnt-card-sub\">Baie: " + listaBaie + "</div></div>";
                 });
             });
             if (presenteAsterisco) {
@@ -3757,7 +3762,7 @@
         if (avvisiSpostamento.length > 0) {
             html += '<div class="tnt-footnote" style="background:#5c1717;color:#FFD5D5;">' + avvisiSpostamento.sort(confrontaBaie).map(n => "Attenzione, spostamento in " + n).join("<br>") + "</div>";
         }
-        html += '<div class="tnt-lato-toggle-row" style="display:flex;gap:8px;margin:10px 6px 4px;">' + '<button type="button" class="tnt-lato-btn" data-lato="100" style="flex:1;padding:8px;border-radius:6px;border:none;font-weight:700;font-size:12px;cursor:pointer;background:' + (latiChiusiScarico["100"] ? "#5c1717;color:#FFD5D5;" : "#043d33;color:#BFF3DF;") + '">100 ' + (latiChiusiScarico["100"] ? "chiusa" : "aperta") + "</button>" + '<button type="button" class="tnt-lato-btn" data-lato="200" style="flex:1;padding:8px;border-radius:6px;border:none;font-weight:700;font-size:12px;cursor:pointer;background:' + (latiChiusiScarico["200"] ? "#5c1717;color:#FFD5D5;" : "#043d33;color:#BFF3DF;") + '">200 ' + (latiChiusiScarico["200"] ? "chiusa" : "aperta") + "</button>" + "</div>";
+        html += "<div class=\"tnt-lato-toggle-row\" style=\"display:flex;gap:8px;margin:10px 6px 4px;\"><button type=\"button\" class=\"tnt-lato-btn\" data-lato=\"100\" style=\"flex:1;padding:8px;border-radius:6px;border:none;font-weight:700;font-size:12px;cursor:pointer;background:" + (latiChiusiScarico["100"] ? "#5c1717;color:#FFD5D5;" : "#043d33;color:#BFF3DF;") + "\">100 " + (latiChiusiScarico["100"] ? "chiusa" : "aperta") + "</button><button type=\"button\" class=\"tnt-lato-btn\" data-lato=\"200\" style=\"flex:1;padding:8px;border-radius:6px;border:none;font-weight:700;font-size:12px;cursor:pointer;background:" + (latiChiusiScarico["200"] ? "#5c1717;color:#FFD5D5;" : "#043d33;color:#BFF3DF;") + "\">200 " + (latiChiusiScarico["200"] ? "chiusa" : "aperta") + "</button></div>";
         panelBody.innerHTML = html;
     }
     function aggiornaPannelloOutbound() {
@@ -3782,7 +3787,7 @@
             html += lista.map(r => {
                 const minutiTesto = r.diffMinuti >= 0 ? Math.round(r.diffMinuti) + " min" : "In ritardo";
                 const classeCard = r.diffMinuti <= 30 ? "tnt-card-rosso" : "tnt-card-ambra";
-                return '<div class="tnt-card ' + classeCard + '">' + '<div class="tnt-card-row">' + '<span class="tnt-card-title">' + r.door + (r.destinazione ? " · " + escapeHtml(r.destinazione) : "") + "</span>" + '<span class="tnt-badge">' + minutiTesto + "</span>" + "</div>" + "</div>";
+                return "<div class=\"tnt-card " + classeCard + "\"><div class=\"tnt-card-row\"><span class=\"tnt-card-title\">" + r.door + (r.destinazione ? " · " + escapeHtml(r.destinazione) : "") + "</span><span class=\"tnt-badge\">" + minutiTesto + "</span></div></div>";
             }).join("");
         });
         body.innerHTML = html || '<div class="tnt-empty">Nessuna baia in scadenza</div>';
@@ -3834,7 +3839,7 @@
         panel.id = id;
         panel.className = "tnt-panel";
         panel.style.width = "320px";
-        panel.innerHTML = '<div class="tnt-panel-header">' + '<div class="tnt-panel-title"><span class="tnt-dot-titolo" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + coloreIcona + ';"></span>' + titolo + "</div>" + '<div style="display:flex;align-items:center;gap:2px;">' + (onRefresh ? '<span class="tnt-panel-refresh" title="Aggiorna">&#8635;</span>' : "") + '<span class="tnt-panel-close" title="Chiudi">&#10005;</span>' + "</div>" + "</div>" + '<div class="tnt-panel-body" id="' + id + '-body"></div>';
+        panel.innerHTML = "<div class=\"tnt-panel-header\"><div class=\"tnt-panel-title\"><span class=\"tnt-dot-titolo\" style=\"display:inline-block;width:8px;height:8px;border-radius:50%;background:" + coloreIcona + ";\"></span>" + titolo + "</div><div style=\"display:flex;align-items:center;gap:2px;\">" + (onRefresh ? '<span class="tnt-panel-refresh" title="Aggiorna">&#8635;</span>' : "") + "<span class=\"tnt-panel-close\" title=\"Chiudi\">&#10005;</span></div></div><div class=\"tnt-panel-body\" id=\"" + id + "-body\"></div>";
         document.body.appendChild(panel);
         panel.querySelector(".tnt-panel-close").addEventListener("click", e => {
             e.stopPropagation();
