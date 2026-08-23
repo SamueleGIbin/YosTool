@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.20
+// @version      3.21
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -1346,7 +1346,7 @@
     const MARGINE_MINIMO_DOMESTICO_MINUTI = 60;
     const MARGINE_MINIMO_INTERNAZIONALE_MINUTI = 150;
     const ORARIO_CHIUSURA_SABATO_MINUTI = 2 * 60;
-    const ORARIO_RIAPERTURA_DOMENICA_MINUTI = 21 * 60 + 30;
+    const ORARIO_RIAPERTURA_DOMENICA_MINUTI = 20 * 60 + 30;
     function calcolaInizioTurnoCorrente(riferimento) {
         const now = riferimento || new Date;
         const giorno = now.getDay();
@@ -1363,6 +1363,7 @@
             if (minutiOggi >= POMERIGGIO_MIN) return dataOra(0, 16, 0);
             return dataOra(-1, 16, 0);
         }
+        if (giorno === 6) return dataOra(-1, 16, 0);
         if (minutiOggi >= POMERIGGIO_MIN) return dataOra(0, 16, 0);
         return dataOra(0, 0, 0);
     }
@@ -1518,13 +1519,21 @@
         if (giorno === 0 && minutiGiorno < ORARIO_RIAPERTURA_DOMENICA_MINUTI) return true;
         return false;
     }
+    function prossimaAperturaSeChiuso(data) {
+        if (!eOrarioDiChiusura(data)) return null;
+        const giorno = data.getDay();
+        const offsetGiorni = giorno === 6 ? 1 : 0;
+        return new Date(data.getFullYear(), data.getMonth(), data.getDate() + offsetGiorni, Math.floor(ORARIO_RIAPERTURA_DOMENICA_MINUTI / 60), ORARIO_RIAPERTURA_DOMENICA_MINUTI % 60, 0, 0);
+    }
     function trovaProssimoCutoffConMargine(cutoffBase, arrivoPortaReale, margineMinimo) {
         const ancora = arrivoPortaReale && !isNaN(arrivoPortaReale.getTime()) && arrivoPortaReale.getTime() > cutoffBase.getTime() ? arrivoPortaReale : cutoffBase;
         const candidati = [];
         for (let offset = 0; offset <= 5; offset++) {
             SLOT_CUTOFF_UNICI.forEach(slot => {
-                const d = new Date(ancora.getFullYear(), ancora.getMonth(), ancora.getDate() + offset, slot.ore, slot.min, 0, 0);
-                if (d.getTime() > cutoffBase.getTime() && !eOrarioDiChiusura(d)) candidati.push(d);
+                let d = new Date(ancora.getFullYear(), ancora.getMonth(), ancora.getDate() + offset, slot.ore, slot.min, 0, 0);
+                const riapertura = prossimaAperturaSeChiuso(d);
+                if (riapertura) d = riapertura;
+                if (d.getTime() > cutoffBase.getTime()) candidati.push(d);
             });
         }
         candidati.sort((a, b) => a.getTime() - b.getTime());
@@ -1541,8 +1550,10 @@
         const choices = [];
         candidati.forEach(cat => {
             for (let offset = -1; offset <= 5; offset++) {
-                const d = new Date(arrivo.getFullYear(), arrivo.getMonth(), arrivo.getDate() + offset, cat.cutoffOre, cat.cutoffMin, 0, 0);
-                if (d.getTime() >= arrivo.getTime() && !eOrarioDiChiusura(d)) {
+                let d = new Date(arrivo.getFullYear(), arrivo.getMonth(), arrivo.getDate() + offset, cat.cutoffOre, cat.cutoffMin, 0, 0);
+                const riapertura = prossimaAperturaSeChiuso(d);
+                if (riapertura) d = riapertura;
+                if (d.getTime() >= arrivo.getTime()) {
                     choices.push({
                         cat: cat,
                         cutoffDate: d
