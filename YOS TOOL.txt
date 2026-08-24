@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.25
+// @version      3.26
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -1789,7 +1789,10 @@
                     riga.appendChild(creaColTurno("Tipo Cutoff", risultato.cat.nome));
                     const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
                     const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
-                    riga.appendChild(creaColTurno("Orario Cutoff", hh + ":" + mm));
+                    const oggiRif = new Date();
+                    const eOggiCutoff = risultato.cutoffDate.getFullYear() === oggiRif.getFullYear() && risultato.cutoffDate.getMonth() === oggiRif.getMonth() && risultato.cutoffDate.getDate() === oggiRif.getDate();
+                    const testoOrarioCutoff = eOggiCutoff ? hh + ":" + mm : String(risultato.cutoffDate.getDate()).padStart(2, "0") + "/" + String(risultato.cutoffDate.getMonth() + 1).padStart(2, "0") + " " + hh + ":" + mm;
+                    riga.appendChild(creaColTurno("Orario Cutoff", testoOrarioCutoff));
                 } else {
                     riga.appendChild(creaColTurno("Turno", "N/A"));
                     riga.appendChild(creaColTurno("Tipo Cutoff", "N/A"));
@@ -1803,13 +1806,14 @@
                     sezione.appendChild(avvisoCodice);
                 }
                 if (risultato && risultato.ritardo && risultato.cutoffOriginale && categoriaBaia(baiaSelezionata) === "Scarico") {
-                    const hhO = String(risultato.cutoffOriginale.getHours()).padStart(2, "0");
-                    const mmO = String(risultato.cutoffOriginale.getMinutes()).padStart(2, "0");
-                    const hhN = String(risultato.cutoffDate.getHours()).padStart(2, "0");
-                    const mmN = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
+                    const etichettaCutoff = (d) => {
+                        const hh2 = String(d.getHours()).padStart(2, "0");
+                        const mm2 = String(d.getMinutes()).padStart(2, "0");
+                        return String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0") + " " + hh2 + ":" + mm2;
+                    };
                     const avviso = document.createElement("div");
                     avviso.className = "row door-info__movmt-section-row tnt-avviso-ritardo";
-                    avviso.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Cutoff spostato per arrivo in ritardo: <strong>' + hhO + ":" + mmO + "</strong> &rarr; <strong>" + hhN + ":" + mmN + "</strong> (meno di " + (risultato.margineMinimo || MARGINE_MINIMO_INTERNAZIONALE_MINUTI) + " minuti di lavorazione disponibili)</div></div>";
+                    avviso.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Cutoff spostato per arrivo in ritardo: <strong>' + etichettaCutoff(risultato.cutoffOriginale) + "</strong> &rarr; <strong>" + etichettaCutoff(risultato.cutoffDate) + "</strong> (meno di " + (risultato.margineMinimo || MARGINE_MINIMO_INTERNAZIONALE_MINUTI) + " minuti di lavorazione disponibili)</div></div>";
                     sezione.appendChild(avviso);
                 }
             } catch (e) { registraErroreSilenzioso(e); }
