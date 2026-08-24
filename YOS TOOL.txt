@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.23
+// @version      3.24
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
 // @match        https://forms.cloud.microsoft/*
+// @noframes
 // @grant        GM_xmlhttpRequest
 // @grant        GM_cookie
 // @connect      yostool-default-rtdb.firebaseio.com
@@ -455,6 +456,7 @@
                 });
                 if (risp.status === 401 || risp.status === 403) {
                     _pollBlacklist401.set(url, Date.now() + BLOCCO_401_MS);
+                    _yosDiag.poll401++;
                     return;
                 }
                 if (risp.ok) _pollCooldown.set(url, Date.now());
@@ -463,6 +465,16 @@
             } catch (e) {}
         }));
     }
+    const _yosDiag = {
+        poll401: 0,
+        formatoInatteso: 0,
+        riconciliazioniBaia: 0,
+        conflittiBuffer: 0
+    };
+    window.__yosDiag = function() {
+        console.table(_yosDiag);
+        return Object.assign({}, _yosDiag);
+    };
     const cacheMovimentiPerUnit = new Map;
     const cacheCutoffPerBaia = new Map;
     const cacheRemarksPerBaia = new Map;
@@ -540,27 +552,45 @@
     async function toggleBufferManuale(doorNumber) {
         if (!doorNumber) return;
         const attivo = bufferManualeBaie.has(doorNumber);
-        if (attivo) { bufferManualeBaie.delete(doorNumber); } else { bufferManualeBaie.set(doorNumber, {
+        const nuovoValore = attivo ? null : {
             ts: (new Date).toISOString()
-        }); }
+        };
+        if (nuovoValore) bufferManualeBaie.set(doorNumber, nuovoValore); else bufferManualeBaie.delete(doorNumber);
         salvaBufferManualeSuStorage();
-        aggiornaBadgeBufferSuDOM(doorNumber, !attivo);
+        aggiornaBadgeBufferSuDOM(doorNumber, !!nuovoValore);
         aggiornaFlagBufferSessioneInCorso(doorNumber);
         aggiornaPannelloScaricoSeAperto();
         try {
             const token = await otteniIdTokenValido();
             const url = FIREBASE_SYNC.BASE_URL + "/bufferManuale/" + doorNumber + ".json?auth=" + token;
-            if (attivo) { await fetch(url, {
-                method: "DELETE"
-            }); } else { await fetch(url, {
-                method: "PUT",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    ts: (new Date).toISOString()
-                })
-            }); }
+            if (nuovoValore) {
+                await fetch(url, {
+                    method: "PUT",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(nuovoValore)
+                });
+            } else {
+                await fetch(url, {
+                    method: "DELETE"
+                });
+            }
+            const conferma = await fetch(url, {
+                cache: "no-store"
+            });
+            if (conferma.ok) {
+                const valoreReale = await conferma.json();
+                const attivoReale = !!valoreReale;
+                if (attivoReale !== !!nuovoValore) {
+                    _yosDiag.conflittiBuffer++;
+                    if (attivoReale) bufferManualeBaie.set(doorNumber, valoreReale); else bufferManualeBaie.delete(doorNumber);
+                    salvaBufferManualeSuStorage();
+                    aggiornaBadgeBufferSuDOM(doorNumber, attivoReale);
+                    aggiornaFlagBufferSessioneInCorso(doorNumber);
+                    aggiornaPannelloScaricoSeAperto();
+                }
+            }
         } catch (e) {}
     }
     const STORAGE_KEY_CACHE_MOVIMENTI = "tnt_cache_movimenti_per_unit_v1";
@@ -619,6 +649,11 @@
         return Array.isArray(dati) && dati.length > 0 && dati[0] && typeof dati[0] === "object" && "movementId" in dati[0] && Array.isArray(dati[0].units) && "origin" in dati[0];
     }
     function elaboreRispostaMovimenti(movimenti) {
+        if (!Array.isArray(movimenti)) {
+            _yosDiag.formatoInatteso++;
+            console.warn("[YOS TOOL] formato inatteso: movimenti non è un array", movimenti);
+            return;
+        }
         const unitAggiornati = [];
         movimenti.forEach(m => {
             if (!m || !Array.isArray(m.units)) return;
@@ -865,7 +900,11 @@
         pianificaSincronizzazione(5e3);
     }
     function elaboraRispostaDockingDoors(porte) {
-        if (!Array.isArray(porte)) return;
+        if (!Array.isArray(porte)) {
+            _yosDiag.formatoInatteso++;
+            console.warn("[YOS TOOL] formato inatteso: dockingDoors non è un array", porte);
+            return;
+        }
         const arrivi = caricaArriviBaia();
         let modificato = false;
         porte.forEach(porta => {
@@ -927,7 +966,11 @@
         if (modificato) salvaArriviBaia(arrivi);
     }
     function elaboraRispostaParkingBay(porte) {
-        if (!Array.isArray(porte)) return;
+        if (!Array.isArray(porte)) {
+            _yosDiag.formatoInatteso++;
+            console.warn("[YOS TOOL] formato inatteso: parkingBay non è un array", porte);
+            return;
+        }
         const arrivi = caricaArriviBaia();
         let modificato = false;
         porte.forEach(porta => {
@@ -1936,7 +1979,13 @@
         const idFallback = "TRIP_" + (tripId || codiceOrigine + "_" + orarioFallback);
         const arrivi = caricaArriviBaia();
         const esistente = arrivi[doorNumber];
-        if (esistente && String(esistente.unitId).indexOf("TRIP_") !== 0) return;
+        if (esistente && String(esistente.unitId).indexOf("TRIP_") !== 0) {
+            const movEsistente = cacheMovimentiPerUnit.get(String(esistente.unitId));
+            const disallineato = movEsistente && codiceOrigine && movEsistente.origin && movEsistente.origin !== codiceOrigine;
+            if (!disallineato) return;
+            cacheCutoffPerBaia.delete(doorNumber);
+            _yosDiag.riconciliazioniBaia++;
+        }
         if (esistente && esistente.unitId === idFallback) return;
         arrivi[doorNumber] = {
             unitId: idFallback,
