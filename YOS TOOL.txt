@@ -1,12 +1,11 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.24
+// @version      3.25
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
 // @match        https://forms.cloud.microsoft/*
-// @noframes
 // @grant        GM_xmlhttpRequest
 // @grant        GM_cookie
 // @connect      yostool-default-rtdb.firebaseio.com
@@ -69,7 +68,7 @@
                 await fetch(url, {
                     method: "DELETE"
                 });
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
         }
         function blAttendi(ms) {
             return new Promise(r => setTimeout(r, ms));
@@ -236,6 +235,23 @@
         return;
     }
     if (location.hostname !== "yos.apps.tnt.com") return;
+    const LOG_ERRORI_MAX = 50;
+    let logErroriRecenti = [];
+    try {
+        const grezzo = localStorage.getItem("yosToolErrorLog");
+        if (grezzo) logErroriRecenti = JSON.parse(grezzo);
+    } catch (e) { registraErroreSilenzioso(e); }
+    function registraErroreSilenzioso(e, contesto) {
+        try {
+            logErroriRecenti.push({
+                ts: (new Date).toISOString(),
+                contesto: contesto || "",
+                messaggio: (e && e.message) || String(e)
+            });
+            if (logErroriRecenti.length > LOG_ERRORI_MAX) logErroriRecenti.shift();
+            localStorage.setItem("yosToolErrorLog", JSON.stringify(logErroriRecenti));
+        } catch (e2) {}
+    }
     const FIREBASE_SYNC = {
         ATTIVO: true,
         BASE_URL: "https://yostool-default-rtdb.firebaseio.com",
@@ -338,7 +354,7 @@
     function salvaHeaderAutenticazioneCache() {
         try {
             sessionStorage.setItem(HEADER_CACHE_KEY, JSON.stringify(headerAutenticazioneCache));
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     const _pollBlacklist401 = new Map;
     const BLOCCO_401_MS = 9e4;
@@ -379,14 +395,14 @@
                 elaboraRispostaParkingBay(JSON.parse(testoBody));
                 return;
             }
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
         try {
             const dati = JSON.parse(testoBody);
             if (sembraListaMovimenti(dati)) {
                 urlMovimentiViste.add(urlStr);
                 elaboreRispostaMovimenti(dati);
             }
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     (function interceptaXHR() {
         const origOpen = XMLHttpRequest.prototype.open;
@@ -400,17 +416,17 @@
         XMLHttpRequest.prototype.setRequestHeader = function(nome, valore) {
             try {
                 if (this._tntHeaders) this._tntHeaders[nome] = valore;
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
             return origSetHeader.apply(this, arguments);
         };
         XMLHttpRequest.prototype.send = function(body) {
             try {
                 catturaHeaderAutenticazione(this._tntUrl, this._tntHeaders);
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
             this.addEventListener("load", function() {
                 try {
                     gestisciRispostaIntercettata(this._tntUrl, this.responseText);
-                } catch (e) {}
+                } catch (e) { registraErroreSilenzioso(e); }
             });
             return origSend.apply(this, arguments);
         };
@@ -423,15 +439,15 @@
             try {
                 const h = init && init.headers ? init.headers : input && input.headers;
                 catturaHeaderAutenticazione(url, h);
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
             return origFetch.apply(this, arguments).then(response => {
                 try {
                     response.clone().text().then(testo => {
                         try {
                             gestisciRispostaIntercettata(url, testo);
-                        } catch (e) {}
+                        } catch (e) { registraErroreSilenzioso(e); }
                     }).catch(() => {});
-                } catch (e) {}
+                } catch (e) { registraErroreSilenzioso(e); }
                 return response;
             });
         };
@@ -456,25 +472,14 @@
                 });
                 if (risp.status === 401 || risp.status === 403) {
                     _pollBlacklist401.set(url, Date.now() + BLOCCO_401_MS);
-                    _yosDiag.poll401++;
                     return;
                 }
                 if (risp.ok) _pollCooldown.set(url, Date.now());
                 const testo = await risp.text();
                 gestisciRispostaIntercettata(url, testo);
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
         }));
     }
-    const _yosDiag = {
-        poll401: 0,
-        formatoInatteso: 0,
-        riconciliazioniBaia: 0,
-        conflittiBuffer: 0
-    };
-    window.__yosDiag = function() {
-        console.table(_yosDiag);
-        return Object.assign({}, _yosDiag);
-    };
     const cacheMovimentiPerUnit = new Map;
     const cacheCutoffPerBaia = new Map;
     const cacheRemarksPerBaia = new Map;
@@ -484,7 +489,7 @@
         const raw = localStorage.getItem(STORAGE_KEY_BUFFER_MANUALE);
         const obj = raw ? JSON.parse(raw) : {};
         Object.keys(obj).forEach(k => bufferManualeBaie.set(k, obj[k]));
-    } catch (e) {}
+    } catch (e) { registraErroreSilenzioso(e); }
     function salvaBufferManualeSuStorage() {
         try {
             const obj = {};
@@ -492,7 +497,7 @@
                 obj[k] = v;
             });
             localStorage.setItem(STORAGE_KEY_BUFFER_MANUALE, JSON.stringify(obj));
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     function baiaBloccataScarico(doorNumber) {
         if (bufferManualeBaie.has(doorNumber)) return true;
@@ -547,51 +552,40 @@
                 salvaBufferManualeSuStorage();
                 aggiornaPannelloScaricoSeAperto();
             }
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     async function toggleBufferManuale(doorNumber) {
         if (!doorNumber) return;
         const attivo = bufferManualeBaie.has(doorNumber);
-        const nuovoValore = attivo ? null : {
-            ts: (new Date).toISOString()
-        };
-        if (nuovoValore) bufferManualeBaie.set(doorNumber, nuovoValore); else bufferManualeBaie.delete(doorNumber);
+        if (attivo) { bufferManualeBaie.delete(doorNumber); } else {
+            bufferManualeBaie.set(doorNumber, {
+                ts: (new Date).toISOString()
+            });
+            cacheCutoffPerBaia.delete(doorNumber);
+            try {
+                const voceArrivo = caricaArriviBaia()[doorNumber];
+                if (voceArrivo && voceArrivo.unitId) unitVerificatiCutoff.delete(String(voceArrivo.unitId));
+            } catch (e) { registraErroreSilenzioso(e); }
+        }
         salvaBufferManualeSuStorage();
-        aggiornaBadgeBufferSuDOM(doorNumber, !!nuovoValore);
+        aggiornaBadgeBufferSuDOM(doorNumber, !attivo);
         aggiornaFlagBufferSessioneInCorso(doorNumber);
         aggiornaPannelloScaricoSeAperto();
         try {
             const token = await otteniIdTokenValido();
             const url = FIREBASE_SYNC.BASE_URL + "/bufferManuale/" + doorNumber + ".json?auth=" + token;
-            if (nuovoValore) {
-                await fetch(url, {
-                    method: "PUT",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify(nuovoValore)
-                });
-            } else {
-                await fetch(url, {
-                    method: "DELETE"
-                });
-            }
-            const conferma = await fetch(url, {
-                cache: "no-store"
-            });
-            if (conferma.ok) {
-                const valoreReale = await conferma.json();
-                const attivoReale = !!valoreReale;
-                if (attivoReale !== !!nuovoValore) {
-                    _yosDiag.conflittiBuffer++;
-                    if (attivoReale) bufferManualeBaie.set(doorNumber, valoreReale); else bufferManualeBaie.delete(doorNumber);
-                    salvaBufferManualeSuStorage();
-                    aggiornaBadgeBufferSuDOM(doorNumber, attivoReale);
-                    aggiornaFlagBufferSessioneInCorso(doorNumber);
-                    aggiornaPannelloScaricoSeAperto();
-                }
-            }
-        } catch (e) {}
+            if (attivo) { await fetch(url, {
+                method: "DELETE"
+            }); } else { await fetch(url, {
+                method: "PUT",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    ts: (new Date).toISOString()
+                })
+            }); }
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     const STORAGE_KEY_CACHE_MOVIMENTI = "tnt_cache_movimenti_per_unit_v1";
     function caricaCacheMovimentiDaStorage() {
@@ -599,7 +593,7 @@
             const raw = localStorage.getItem(STORAGE_KEY_CACHE_MOVIMENTI);
             const obj = raw ? JSON.parse(raw) : {};
             Object.keys(obj).forEach(unitId => cacheMovimentiPerUnit.set(unitId, obj[unitId]));
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     function salvaCacheMovimentiSuStorage() {
         try {
@@ -608,7 +602,7 @@
                 obj[k] = v;
             });
             localStorage.setItem(STORAGE_KEY_CACHE_MOVIMENTI, JSON.stringify(obj));
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     function impostaCacheCutoffBaia(doorNumber, risultato, codiceOrigine) {
         if (!doorNumber || !risultato) return;
@@ -649,11 +643,6 @@
         return Array.isArray(dati) && dati.length > 0 && dati[0] && typeof dati[0] === "object" && "movementId" in dati[0] && Array.isArray(dati[0].units) && "origin" in dati[0];
     }
     function elaboreRispostaMovimenti(movimenti) {
-        if (!Array.isArray(movimenti)) {
-            _yosDiag.formatoInatteso++;
-            console.warn("[YOS TOOL] formato inatteso: movimenti non è un array", movimenti);
-            return;
-        }
         const unitAggiornati = [];
         movimenti.forEach(m => {
             if (!m || !Array.isArray(m.units)) return;
@@ -795,11 +784,11 @@
     try {
         const raw = localStorage.getItem(STORAGE_KEY_LATI_CHIUSI);
         if (raw) Object.assign(latiChiusiScarico, JSON.parse(raw));
-    } catch (e) {}
+    } catch (e) { registraErroreSilenzioso(e); }
     function salvaLatiChiusiScarico() {
         try {
             localStorage.setItem(STORAGE_KEY_LATI_CHIUSI, JSON.stringify(latiChiusiScarico));
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     function baieDelLato(lato) {
         return (LATI_CHIUDIBILI[lato] || []).map(String);
@@ -831,7 +820,7 @@
             const raw = localStorage.getItem(STORAGE_KEY_SESSIONI_IN_CORSO);
             const obj = raw ? JSON.parse(raw) : {};
             Object.keys(obj).forEach(doorNumber => sessioniScaricoInCorso.set(doorNumber, obj[doorNumber]));
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     function salvaSessioniInCorsoSuStorage() {
         try {
@@ -840,7 +829,7 @@
                 obj[k] = v;
             });
             localStorage.setItem(STORAGE_KEY_SESSIONI_IN_CORSO, JSON.stringify(obj));
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     function caricaSessioniScarico() {
         try {
@@ -900,11 +889,7 @@
         pianificaSincronizzazione(5e3);
     }
     function elaboraRispostaDockingDoors(porte) {
-        if (!Array.isArray(porte)) {
-            _yosDiag.formatoInatteso++;
-            console.warn("[YOS TOOL] formato inatteso: dockingDoors non è un array", porte);
-            return;
-        }
+        if (!Array.isArray(porte)) return;
         const arrivi = caricaArriviBaia();
         let modificato = false;
         porte.forEach(porta => {
@@ -966,11 +951,7 @@
         if (modificato) salvaArriviBaia(arrivi);
     }
     function elaboraRispostaParkingBay(porte) {
-        if (!Array.isArray(porte)) {
-            _yosDiag.formatoInatteso++;
-            console.warn("[YOS TOOL] formato inatteso: parkingBay non è un array", porte);
-            return;
-        }
+        if (!Array.isArray(porte)) return;
         const arrivi = caricaArriviBaia();
         let modificato = false;
         porte.forEach(porta => {
@@ -1085,7 +1066,7 @@
             try {
                 const EventCtor = tipo.indexOf("pointer") === 0 && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
                 elemento.dispatchEvent(new EventCtor(tipo, opzioniBase));
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
         });
     }
     function simulaHoverReale(elemento) {
@@ -1105,7 +1086,7 @@
             try {
                 const EventCtor = tipo.indexOf("pointer") === 0 && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
                 elemento.dispatchEvent(new EventCtor(tipo, opzioni));
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
         });
     }
     function rimuoviHoverReale(elemento) {
@@ -1120,7 +1101,7 @@
             try {
                 const EventCtor = tipo.indexOf("pointer") === 0 && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
                 elemento.dispatchEvent(new EventCtor(tipo, opzioni));
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
         });
     }
     function leggiTooltipBaiaCorrente() {
@@ -1200,7 +1181,7 @@
             await new Promise(r => setTimeout(r, 500));
             try {
                 processaTripDetails();
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
             if (voce.registraMancante) {
                 const arriviOra = caricaArriviBaia()[voce.doorNumber];
                 if (arriviOra && arriviOra.unitId) voce.unitId = String(arriviOra.unitId);
@@ -1233,7 +1214,7 @@
                     }
                 }
             }
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
         codaInLavorazione = false;
     }
     const codeMap = {
@@ -1386,6 +1367,20 @@
         cutoffMin: 50,
         codici: [ "LYS", "MRS", "NT3", "BA5" ]
     } ];
+    (function validaCategorieAllAvvio() {
+        const orarioPerCodice = new Map;
+        CATEGORIE.forEach(cat => {
+            cat.codici.forEach(codice => {
+                const orario = cat.cutoffOre + ":" + cat.cutoffMin;
+                if (!orarioPerCodice.has(codice)) orarioPerCodice.set(codice, []);
+                orarioPerCodice.get(codice).push(cat.nome + " (" + orario + ")");
+            });
+        });
+        orarioPerCodice.forEach((elenco, codice) => {
+            const orariUnici = new Set(elenco.map(v => v.split(" (")[1]));
+            if (orariUnici.size > 1) registraErroreSilenzioso("codice \"" + codice + "\" presente in categorie con orari diversi: " + elenco.join(", "), "validaCategorie");
+        });
+    })();
     const MARGINE_MINIMO_DOMESTICO_MINUTI = 60;
     const MARGINE_MINIMO_INTERNAZIONALE_MINUTI = 150;
     const ORARIO_CHIUSURA_SABATO_MINUTI = 2 * 60;
@@ -1430,7 +1425,7 @@
     function salvaColliStorico(arr) {
         try {
             localStorage.setItem(STORAGE_KEY_COLLI_STORICO, JSON.stringify(arr));
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     function unisciColliStorico(listaA, listaB) {
         const mappa = new Map;
@@ -1497,7 +1492,7 @@
     function salvaImpostazioniColli(obj) {
         try {
             localStorage.setItem(STORAGE_KEY_COLLI_IMPOSTAZIONI, JSON.stringify(obj));
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     function calcolaInizioDatiColli() {
         const imp = caricaImpostazioniColli();
@@ -1817,7 +1812,7 @@
                     avviso.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Cutoff spostato per arrivo in ritardo: <strong>' + hhO + ":" + mmO + "</strong> &rarr; <strong>" + hhN + ":" + mmN + "</strong> (meno di " + (risultato.margineMinimo || MARGINE_MINIMO_INTERNAZIONALE_MINUTI) + " minuti di lavorazione disponibili)</div></div>";
                     sezione.appendChild(avviso);
                 }
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
         });
     }
     const COLORI_UNIT_PRONTA = [ "rgb(135,185,172)" ];
@@ -1837,7 +1832,7 @@
         if (!colore && window.getComputedStyle) {
             try {
                 colore = window.getComputedStyle(dockingBg).backgroundColor || "";
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
         }
         colore = colore.replace(/\s+/g, "");
         if (!colore) return false;
@@ -1979,13 +1974,7 @@
         const idFallback = "TRIP_" + (tripId || codiceOrigine + "_" + orarioFallback);
         const arrivi = caricaArriviBaia();
         const esistente = arrivi[doorNumber];
-        if (esistente && String(esistente.unitId).indexOf("TRIP_") !== 0) {
-            const movEsistente = cacheMovimentiPerUnit.get(String(esistente.unitId));
-            const disallineato = movEsistente && codiceOrigine && movEsistente.origin && movEsistente.origin !== codiceOrigine;
-            if (!disallineato) return;
-            cacheCutoffPerBaia.delete(doorNumber);
-            _yosDiag.riconciliazioniBaia++;
-        }
+        if (esistente && String(esistente.unitId).indexOf("TRIP_") !== 0) return;
         if (esistente && esistente.unitId === idFallback) return;
         arrivi[doorNumber] = {
             unitId: idFallback,
@@ -2058,7 +2047,7 @@
         }
         try {
             localStorage.removeItem(chiave);
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
         return arr;
     }
     function escapeHtml(testo) {
@@ -2139,7 +2128,7 @@
     function scriviAuthSalvato(auth) {
         try {
             localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(auth));
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     async function firebaseCreaSessioneAnonima() {
         const res = await gmRequest({
@@ -2285,7 +2274,7 @@
     function salvaColliLocali(obj) {
         try {
             localStorage.setItem(STORAGE_KEY_COLLI, JSON.stringify(obj));
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     const SPLUNK_HOST = "https://ot-splunk1.corp.ds.fedex.com";
     const SPLUNK_SPL = 'search index=ops_reporting_detail location_id="IMRH" sort_area_type="*" sortplan="*" | fields barcode, sort_result, uniqueId | search sort_result IN ("SORTED", "REJECT", "LOST", "OVERFLOW") | stats dc(barcode)';
@@ -2356,13 +2345,13 @@
                 anonymous: false,
                 timeout: 15e3
             });
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     async function pulisciJobSplunkVecchi(csrfInfo) {
         try {
             const sids = await elencaJobSplunk(csrfInfo);
             for (const sid of sids) await eliminaJobSplunk(sid, csrfInfo);
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     async function recuperaColliDaSplunk() {
         const earliest = String(Math.floor(calcolaInizioDatiColli().getTime() / 1e3));
@@ -2392,7 +2381,7 @@
                 if (!r) return;
                 const chiave = Object.keys(r).find(k => /dc\(barcode\)/i.test(k));
                 if (chiave && r[chiave] !== undefined) valore = parseInt(String(r[chiave]).replace(/[^\d]/g, ""), 10);
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
         });
         if (valore === null || isNaN(valore)) throw new Error("nessun dato ricevuto da Splunk (risposta: " + res.responseText.slice(0, 200).replace(/\s+/g, " ") + ")");
         return valore;
@@ -3428,7 +3417,7 @@
                         },
                         body: JSON.stringify(payload)
                     });
-                } catch (e) {}
+                } catch (e) { registraErroreSilenzioso(e); }
                 window.open(FORM_URL_BL, "tnt_bad_loading_form", "noopener,width=900,height=1000,left=100,top=50");
             });
             box.querySelectorAll("[data-copy]").forEach(function(btn) {
@@ -3487,7 +3476,7 @@
                     },
                     body: JSON.stringify(payload)
                 });
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
             window.open(FORM_URL_BL, "tnt_bad_loading_form", "noopener,width=900,height=1000,left=100,top=50");
         });
         btnBL.addEventListener("contextmenu", e => {
@@ -4053,7 +4042,7 @@
         });
         try {
             posizionaBadgeProduttivita();
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
     }
     let riposizionamentoSchedulato = false;
     function schedulaRiposizionamento() {
@@ -4083,31 +4072,31 @@
         impostaBadgeInAttesa();
         try {
             caricaCacheMovimentiDaStorage();
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
         try {
             if (cacheMovimentiPerUnit.size) riarricchisciStoricoConMovimenti([ ...cacheMovimentiPerUnit.keys() ]);
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
         try {
             caricaSessioniInCorsoDaStorage();
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
         try {
             scanBlocchi(document.body);
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
         try {
             pulisciStoricoVecchio();
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
         try {
             initIcone();
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
         try {
             posizionaBadgeProduttivita();
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
         try {
             processaTripDetails();
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
         try {
             bufferManualeBaie.forEach((v, k) => aggiornaBadgeBufferSuDOM(k, true));
-        } catch (e) {}
+        } catch (e) { registraErroreSilenzioso(e); }
         let debounceTimer = null;
         const nodiDaControllare = new Set;
         function eseguiControlliPesanti() {
@@ -4117,19 +4106,19 @@
                 nodi.forEach(n => {
                     if (document.body.contains(n)) scanBlocchi(n);
                 });
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
             try {
                 initIcone();
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
             try {
                 posizionaBadgeProduttivita();
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
             try {
                 processaTripDetails();
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
             try {
                 aggiornaPannelloOutbound();
-            } catch (e) {}
+            } catch (e) { registraErroreSilenzioso(e); }
         }
         function eNodoInterno(n) {
             if (!n || n.nodeType !== 1) return false;
@@ -4182,7 +4171,7 @@
             fn: () => {
                 try {
                     if (cacheMovimentiPerUnit.size) riarricchisciStoricoConMovimenti([ ...cacheMovimentiPerUnit.keys() ]);
-                } catch (e) {}
+                } catch (e) { registraErroreSilenzioso(e); }
             },
             ms: 2 * 60 * 1e3
         }, {
