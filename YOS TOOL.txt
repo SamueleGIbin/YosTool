@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.26
+// @version      3.27
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -1025,7 +1025,7 @@
             });
         });
     }
-    function accodaVerificaBaia(doorNumber, unitId) {
+    function accodaVerificaBaia(doorNumber, unitId, soloBanner) {
         if (!doorNumber || !unitId) return;
         if (eBaiaInShunter(doorNumber)) return;
         const chiave = String(unitId);
@@ -1034,7 +1034,8 @@
         codaVerificaBaie.push({
             doorNumber: doorNumber,
             unitId: chiave,
-            tentativi: 0
+            tentativi: 0,
+            soloBanner: !!soloBanner
         });
     }
     function trovaElementoBaiaPerNumero(doorNumber) {
@@ -1133,6 +1134,25 @@
         aggiornaFlagBufferSessioneInCorso(doorNumber);
         return true;
     }
+    async function aggiornaCutoffViaHover(doorNumber) {
+        const wrapper = trovaElementoBaiaPerNumero(doorNumber);
+        if (!wrapper) return false;
+        simulaHoverReale(wrapper);
+        await new Promise(r => setTimeout(r, 250));
+        const righe = leggiTooltipBaiaCorrente();
+        rimuoviHoverReale(wrapper);
+        if (!righe) return false;
+        const origine = righe["Origin"];
+        if (!origine) return false;
+        const voce = caricaArriviBaia()[doorNumber];
+        if (!voce || !voce.orario) return false;
+        const arrivo = new Date(voce.orario);
+        if (isNaN(arrivo.getTime())) return false;
+        const risultato = calcolaCutoffPerCodice(origine, arrivo, null);
+        if (!risultato) return false;
+        impostaCacheCutoffBaia(doorNumber, risultato, origine);
+        return true;
+    }
     async function elaboraCodaVerificaBaie() {
         if (codaInLavorazione || codaVerificaBaie.length === 0) return;
         codaInLavorazione = true;
@@ -1158,6 +1178,15 @@
                 const aggiornato = await aggiornaRemarksViaHover(voce.doorNumber);
                 if (aggiornato) {
                     if (eraEscluso !== remarksEsclusiOrologio(cacheRemarksPerBaia.get(voce.doorNumber))) aggiornaPannelloScaricoSeAperto();
+                    codaInLavorazione = false;
+                    return;
+                }
+            }
+            if (voce.soloBanner) {
+                const aggiornato = await aggiornaCutoffViaHover(voce.doorNumber);
+                if (aggiornato) {
+                    unitVerificatiCutoff.add(voce.unitId);
+                    aggiornaPannelloScaricoSeAperto();
                     codaInLavorazione = false;
                     return;
                 }
@@ -1367,20 +1396,6 @@
         cutoffMin: 50,
         codici: [ "LYS", "MRS", "NT3", "BA5" ]
     } ];
-    (function validaCategorieAllAvvio() {
-        const orarioPerCodice = new Map;
-        CATEGORIE.forEach(cat => {
-            cat.codici.forEach(codice => {
-                const orario = cat.cutoffOre + ":" + cat.cutoffMin;
-                if (!orarioPerCodice.has(codice)) orarioPerCodice.set(codice, []);
-                orarioPerCodice.get(codice).push(cat.nome + " (" + orario + ")");
-            });
-        });
-        orarioPerCodice.forEach((elenco, codice) => {
-            const orariUnici = new Set(elenco.map(v => v.split(" (")[1]));
-            if (orariUnici.size > 1) registraErroreSilenzioso("codice \"" + codice + "\" presente in categorie con orari diversi: " + elenco.join(", "), "validaCategorie");
-        });
-    })();
     const MARGINE_MINIMO_DOMESTICO_MINUTI = 60;
     const MARGINE_MINIMO_INTERNAZIONALE_MINUTI = 150;
     const ORARIO_CHIUSURA_SABATO_MINUTI = 2 * 60;
@@ -1789,10 +1804,7 @@
                     riga.appendChild(creaColTurno("Tipo Cutoff", risultato.cat.nome));
                     const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
                     const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
-                    const oggiRif = new Date();
-                    const eOggiCutoff = risultato.cutoffDate.getFullYear() === oggiRif.getFullYear() && risultato.cutoffDate.getMonth() === oggiRif.getMonth() && risultato.cutoffDate.getDate() === oggiRif.getDate();
-                    const testoOrarioCutoff = eOggiCutoff ? hh + ":" + mm : String(risultato.cutoffDate.getDate()).padStart(2, "0") + "/" + String(risultato.cutoffDate.getMonth() + 1).padStart(2, "0") + " " + hh + ":" + mm;
-                    riga.appendChild(creaColTurno("Orario Cutoff", testoOrarioCutoff));
+                    riga.appendChild(creaColTurno("Orario Cutoff", hh + ":" + mm));
                 } else {
                     riga.appendChild(creaColTurno("Turno", "N/A"));
                     riga.appendChild(creaColTurno("Tipo Cutoff", "N/A"));
@@ -1806,14 +1818,13 @@
                     sezione.appendChild(avvisoCodice);
                 }
                 if (risultato && risultato.ritardo && risultato.cutoffOriginale && categoriaBaia(baiaSelezionata) === "Scarico") {
-                    const etichettaCutoff = (d) => {
-                        const hh2 = String(d.getHours()).padStart(2, "0");
-                        const mm2 = String(d.getMinutes()).padStart(2, "0");
-                        return String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0") + " " + hh2 + ":" + mm2;
-                    };
+                    const hhO = String(risultato.cutoffOriginale.getHours()).padStart(2, "0");
+                    const mmO = String(risultato.cutoffOriginale.getMinutes()).padStart(2, "0");
+                    const hhN = String(risultato.cutoffDate.getHours()).padStart(2, "0");
+                    const mmN = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
                     const avviso = document.createElement("div");
                     avviso.className = "row door-info__movmt-section-row tnt-avviso-ritardo";
-                    avviso.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Cutoff spostato per arrivo in ritardo: <strong>' + etichettaCutoff(risultato.cutoffOriginale) + "</strong> &rarr; <strong>" + etichettaCutoff(risultato.cutoffDate) + "</strong> (meno di " + (risultato.margineMinimo || MARGINE_MINIMO_INTERNAZIONALE_MINUTI) + " minuti di lavorazione disponibili)</div></div>";
+                    avviso.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Cutoff spostato per arrivo in ritardo: <strong>' + hhO + ":" + mmO + "</strong> &rarr; <strong>" + hhN + ":" + mmN + "</strong> (meno di " + (risultato.margineMinimo || MARGINE_MINIMO_INTERNAZIONALE_MINUTI) + " minuti di lavorazione disponibili)</div></div>";
                     sezione.appendChild(avviso);
                 }
             } catch (e) { registraErroreSilenzioso(e); }
@@ -1936,6 +1947,29 @@
                 tentativi: 0,
                 registraMancante: true
             });
+        });
+    }
+    function trovaBaieSenzaCutoff() {
+        const arrivi = caricaArriviBaia();
+        const risultati = [];
+        Object.keys(arrivi).forEach(doorNumber => {
+            const voce = arrivi[doorNumber];
+            if (!voce || !voce.unitId) return;
+            const cat = categoriaBaia(doorNumber);
+            if (cat !== "Scarico" && cat !== "Parcheggio") return;
+            if (cat === "Parcheggio" && !eParcheggioScarico(doorNumber)) return;
+            if (baiaBloccataScarico(doorNumber)) return;
+            if (unitVerificatiCutoff.has(String(voce.unitId))) return;
+            if (leggiCacheCutoffBaia(doorNumber) || calcolaCutoffDaCacheMovimenti(doorNumber)) return;
+            risultati.push(doorNumber);
+        });
+        return risultati;
+    }
+    function accodaBaieSenzaCutoff() {
+        const arrivi = caricaArriviBaia();
+        trovaBaieSenzaCutoff().forEach(doorNumber => {
+            const voce = arrivi[doorNumber];
+            if (voce && voce.unitId) accodaVerificaBaia(doorNumber, voce.unitId, true);
         });
     }
     function trovaBaieFreightParziali() {
@@ -3852,6 +3886,7 @@
     async function forzaRefreshOrologioScaricoManuale(body) {
         await forzaRefreshOrologioScarico(body);
         accodaBaieOccupateNonRegistrate();
+        accodaBaieSenzaCutoff();
     }
     function creaIconaMenu(id, coloreSfondo, disegnoSvg) {
         const iconaSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 46" width="46" height="46"><rect x="0" y="0" width="46" height="46" rx="10" fill="' + coloreSfondo + '"/>' + disegnoSvg + "</svg>";
@@ -4184,6 +4219,9 @@
         }, {
             fn: accodaBaieOccupateNonRegistrate,
             ms: 1e4
+        }, {
+            fn: accodaBaieSenzaCutoff,
+            ms: 15e3
         }, {
             fn: () => {
                 bufferManualeBaie.forEach((v, k) => aggiornaBadgeBufferSuDOM(k, true));
