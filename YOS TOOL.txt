@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.28
+// @version      3.29
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
 // @match        https://forms.cloud.microsoft/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_cookie
+// @grant        unsafeWindow
 // @connect      yostool-default-rtdb.firebaseio.com
 // @connect      identitytoolkit.googleapis.com
 // @connect      securetoken.googleapis.com
@@ -1058,7 +1059,7 @@
             bubbles: true,
             cancelable: true,
             composed: true,
-            view: window,
+            view: unsafeWindow,
             clientX: x,
             clientY: y,
             button: 0
@@ -1079,7 +1080,7 @@
             bubbles: true,
             cancelable: true,
             composed: true,
-            view: window,
+            view: unsafeWindow,
             clientX: x,
             clientY: y
         };
@@ -1096,7 +1097,7 @@
             bubbles: true,
             cancelable: true,
             composed: true,
-            view: window
+            view: unsafeWindow
         };
         [ "pointerout", "pointerleave", "mouseout", "mouseleave" ].forEach(tipo => {
             try {
@@ -1383,7 +1384,7 @@
         turno: "Secondo Shift",
         cutoffOre: 5,
         cutoffMin: 30,
-        codici: [ "BO2", "PD2", "FC5", "PSA", "ZRO", "PSR", "LJU" ]
+        codici: [ "BO2", "PD2", "FC5", "PSA", "ZRO", "PSR", "LJU", "ZD1" ]
     }, {
         nome: "Hub Export/Sud",
         turno: "Secondo Shift",
