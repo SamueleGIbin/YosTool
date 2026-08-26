@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.30
+// @version      3.31
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -551,7 +551,13 @@
                 badge = document.createElement("div");
                 badge.className = "tnt-badge-buffer";
                 badge.textContent = "BUFFER";
-                badge.style.cssText = "position:absolute;top:2px;left:2px;background:#c0392b;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px;z-index:50;pointer-events:none;";
+                badge.title = "Doppio click per rimuovere";
+                badge.style.cssText = "position:absolute;top:2px;left:2px;background:#c0392b;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px;z-index:50;cursor:pointer;pointer-events:auto;";
+                badge.addEventListener("dblclick", e => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    toggleBufferManuale(doorNumber);
+                });
                 if (getComputedStyle(wrapper).position === "static") wrapper.style.position = "relative";
                 wrapper.appendChild(badge);
             }
@@ -1238,6 +1244,11 @@
             }
             const wrapper = trovaElementoBaiaPerNumero(voce.doorNumber);
             if (!wrapper) {
+                codaVerificaBaie.push(voce);
+                codaInLavorazione = false;
+                return;
+            }
+            if (baiaSelezionata && parseInt(baiaSelezionata, 10) >= 10 && parseInt(baiaSelezionata, 10) <= 14 && baiaSelezionata !== voce.doorNumber) {
                 codaVerificaBaie.push(voce);
                 codaInLavorazione = false;
                 return;
@@ -2030,6 +2041,7 @@
     const STORAGE_KEY_ARRIVI = "tnt_arrivi_baia_scarico_v1";
     const STORAGE_KEY_STORICO = "tnt_storico_report_scarico_v1";
     let baiaSelezionata = null;
+    let ultimoAggiornamentoScaricoTs = null;
     function caricaArriviBaia() {
         try {
             const raw = localStorage.getItem(STORAGE_KEY_ARRIVI);
@@ -2466,6 +2478,8 @@
     }
     let ultimoErroreColli = null;
     let aggiornamentoColliInCorso = false;
+    let ultimoClickAggiornaColliTs = 0;
+    const COOLDOWN_AGGIORNA_COLLI_MS = 6e4;
     async function aggiornaColliAutomatico() {
         if (aggiornamentoColliInCorso) return;
         aggiornamentoColliInCorso = true;
@@ -2532,10 +2546,16 @@
             const d = new Date(locale.aggiornatoIl);
             aggiornatoTxt = "Colli aggiornati alle ore " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") + " del " + String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0");
         }
-        body.innerHTML = "<div class=\"tnt-card\"><div class=\"tnt-card-title\">" + statoTxt + "</div><div class=\"tnt-card-sub\">" + aggiornatoTxt + "</div><div class=\"tnt-card-sub\">Dati dalle ore " + hhI + ":" + mmI + "</div></div>" + (ultimoErroreColli ? '<div style="font-size:11px;color:#E24B4A;margin-bottom:8px;">Aggiornamento automatico non riuscito: ' + escapeHtml(ultimoErroreColli) + "</div>" : "") + "<button id=\"tnt-colli-aggiorna-ora\" class=\"tnt-btn-primary\">Aggiorna ora</button><label style=\"display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;\"><input type=\"checkbox\" id=\"tnt-colli-auto\" " + (imp.auto ? "checked" : "") + "> Aggiornamento automatico ogni 30 min</label><label style=\"display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;\"><input type=\"checkbox\" id=\"tnt-colli-manuale\" " + (imp.manuale ? "checked" : "") + "> Imposta a mano da che ora prendere i dati</label><div style=\"display:flex;gap:6px;margin:0 0 10px;\"><input type=\"date\" id=\"tnt-colli-data-manuale\" value=\"" + (imp.dataManuale || (new Date).toISOString().slice(0, 10)) + "\" " + (imp.manuale ? "" : "disabled") + " style=\"flex:1;box-sizing:border-box;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;\"><input type=\"time\" id=\"tnt-colli-orario-manuale\" value=\"" + imp.orarioManuale + "\" " + (imp.manuale ? "" : "disabled") + " style=\"flex:1;box-sizing:border-box;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;\"></div><a href=\"" + costruisciUrlSplunk() + "\" target=\"_blank\" rel=\"noopener\" style=\"display:block;font-size:12px;color:#8B5CF6;margin:4px 0 10px;\">Apri la stessa ricerca su Splunk &#8599;</a>";
+        const restanteCooldown = COOLDOWN_AGGIORNA_COLLI_MS - (Date.now() - ultimoClickAggiornaColliTs);
+        const cooldownAttivo = aggiornamentoColliInCorso || restanteCooldown > 0;
+        const testoBtnAggiorna = aggiornamentoColliInCorso ? "Aggiorno..." : restanteCooldown > 0 ? "Attendi " + Math.ceil(restanteCooldown / 1000) + "s" : "Aggiorna ora";
+        body.innerHTML = "<div class=\"tnt-card\"><div class=\"tnt-card-title\">" + statoTxt + "</div><div class=\"tnt-card-sub\">" + aggiornatoTxt + "</div><div class=\"tnt-card-sub\">Dati dalle ore " + hhI + ":" + mmI + "</div></div>" + (ultimoErroreColli ? '<div style="font-size:11px;color:#E24B4A;margin-bottom:8px;">Aggiornamento automatico non riuscito: ' + escapeHtml(ultimoErroreColli) + "</div>" : "") + "<button id=\"tnt-colli-aggiorna-ora\" class=\"tnt-btn-primary\"" + (cooldownAttivo ? " disabled style=\"opacity:.5;cursor:not-allowed;\"" : "") + ">" + testoBtnAggiorna + "</button><label style=\"display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;\"><input type=\"checkbox\" id=\"tnt-colli-auto\" " + (imp.auto ? "checked" : "") + "> Aggiornamento automatico ogni 30 min</label><label style=\"display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;\"><input type=\"checkbox\" id=\"tnt-colli-manuale\" " + (imp.manuale ? "checked" : "") + "> Imposta a mano da che ora prendere i dati</label><div style=\"display:flex;gap:6px;margin:0 0 10px;\"><input type=\"date\" id=\"tnt-colli-data-manuale\" value=\"" + (imp.dataManuale || (new Date).toISOString().slice(0, 10)) + "\" " + (imp.manuale ? "" : "disabled") + " style=\"flex:1;box-sizing:border-box;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;\"><input type=\"time\" id=\"tnt-colli-orario-manuale\" value=\"" + imp.orarioManuale + "\" " + (imp.manuale ? "" : "disabled") + " style=\"flex:1;box-sizing:border-box;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;\"></div><a href=\"" + costruisciUrlSplunk() + "\" target=\"_blank\" rel=\"noopener\" style=\"display:block;font-size:12px;color:#8B5CF6;margin:4px 0 10px;\">Apri la stessa ricerca su Splunk &#8599;</a>";
         document.getElementById("tnt-colli-aggiorna-ora").addEventListener("click", e => {
             e.stopPropagation();
+            if (aggiornamentoColliInCorso || Date.now() - ultimoClickAggiornaColliTs < COOLDOWN_AGGIORNA_COLLI_MS) return;
+            ultimoClickAggiornaColliTs = Date.now();
             aggiornaColliAutomatico();
+            renderPannelloProduttivita(body);
         });
         document.getElementById("tnt-colli-auto").addEventListener("change", e => {
             const i = caricaImpostazioniColli();
@@ -2560,6 +2580,10 @@
             salvaImpostazioniColli(i);
             renderPannelloProduttivita(body);
         });
+        if (cooldownAttivo) setTimeout(() => {
+            const panelColliAperto = document.getElementById("tnt-colli-panel");
+            if (pannelloAperto(panelColliAperto)) renderPannelloProduttivita(body);
+        }, 1e3);
     }
     function creaBadgeSync() {
         if (document.getElementById("tnt-top-badges")) return;
@@ -3694,6 +3718,7 @@
         return null;
     }
     function scansionaBaieScarico(panelBody) {
+        ultimoAggiornamentoScaricoTs = new Date;
         const gruppi = new Map;
         const ora = new Date;
         const finestra = finestraTurnoCorrente(ora);
@@ -3794,6 +3819,9 @@
     }
     function renderPannelloScaricoConteggi(panelBody, gruppi, finestra) {
         let html = "";
+        if (ultimoAggiornamentoScaricoTs) {
+            html += '<div class="tnt-footnote" style="margin-top:0;">Dati aggiornati alle ' + String(ultimoAggiornamentoScaricoTs.getHours()).padStart(2, "0") + ":" + String(ultimoAggiornamentoScaricoTs.getMinutes()).padStart(2, "0") + "</div>";
+        }
         if (finestra) {
             const hhI = String(finestra.inizio.getHours()).padStart(2, "0");
             const mmI = String(finestra.inizio.getMinutes()).padStart(2, "0");
@@ -4062,7 +4090,7 @@
             const btn2 = creaIconaMenu("tnt-orologio-scarico-btn", "#ffffff", disegnoScarico);
             btn2.title = "Carichi in scadenza cutoff (Scarico)";
             menu.appendChild(btn2);
-            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", COLORE_SEZIONE_SCARICO, () => forzaRefreshOrologioScaricoManuale(document.getElementById("tnt-orologio-scarico-panel-body")));
+            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", COLORE_SEZIONE_SCARICO, () => location.reload());
             const body2 = document.getElementById("tnt-orologio-scarico-panel-body");
             collegaClick(btn2, panel2, () => forzaRefreshOrologioScaricoManuale(body2), ORDINE_GRUPPO_CARICO_SCARICO);
         }
@@ -4109,8 +4137,8 @@
         }
     }
     document.addEventListener("click", e => {
-        if (e.target.closest(".tnt-panel") || e.target.closest(".cc-menu-button")) return;
-        chiudiPannelliEsclusi(ORDINE_GRUPPO_CARICO_SCARICO);
+        if (e.target.closest(".tnt-panel") || e.target.closest(".cc-menu-button") || e.target.closest("#tnt-badge-colli")) return;
+        chiudiPannelliEsclusi(ORDINE_GRUPPO_CARICO_SCARICO.concat([ "tnt-colli-panel" ]));
     });
     const ID_PANNELLI_SINGOLI = [ "tnt-report-panel", "tnt-statistiche-panel" ];
     function riposizionaPannelliAperti() {
@@ -4279,12 +4307,25 @@
         } ];
         const TICK_MS = 1e3;
         let tick = 0;
-        setInterval(() => {
+        function eseguiTick() {
             tick += TICK_MS;
             compiti.forEach(c => {
                 if (tick % c.ms === 0) c.fn();
             });
-        }, TICK_MS);
+        }
+        let workerAttivo = false;
+        try {
+            const blobWorker = new Blob([ "setInterval(function(){postMessage(1);}," + TICK_MS + ");" ], {
+                type: "application/javascript"
+            });
+            const worker = new Worker(URL.createObjectURL(blobWorker));
+            worker.onmessage = eseguiTick;
+            workerAttivo = true;
+        } catch (e) { registraErroreSilenzioso(e); }
+        if (!workerAttivo) setInterval(eseguiTick, TICK_MS);
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible") compiti.forEach(c => c.fn());
+        });
     }
     avviaTool();
 })();
