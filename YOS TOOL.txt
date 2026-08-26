@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.32
+// @version      3.33
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -1268,7 +1268,7 @@
                 const arriviOra = caricaArriviBaia()[voce.doorNumber];
                 if (arriviOra && arriviOra.unitId) voce.unitId = String(arriviOra.unitId);
             }
-            const info = leggiCutoffBaiaCorrente();
+            const info = leggiCutoffBaiaCorrente(voce.doorNumber);
             if (info) {
                 impostaCacheCutoffBaia(voce.doorNumber, info.cutoff, info.codice);
                 unitVerificatiCutoff.add(voce.unitId);
@@ -3648,7 +3648,8 @@
             nome: "Pomeriggio"
         };
     }
-    function leggiCutoffBaiaCorrente() {
+    function leggiCutoffBaiaCorrente(doorNumberTarget) {
+        const doorRif = doorNumberTarget || baiaSelezionata;
         const originClassEl = document.querySelector(".inbound-origin-en-route, .inbound-origin");
         let codiceOrigine = null;
         if (originClassEl && originClassEl.textContent.trim()) codiceOrigine = estraiCodiceGrezzo(originClassEl);
@@ -3672,9 +3673,9 @@
                 }
             }
             let arrivoPortaReale = null;
-            if (baiaSelezionata) {
+            if (doorRif) {
                 const arriviSalvati = caricaArriviBaia();
-                const voceBaia = arriviSalvati[baiaSelezionata];
+                const voceBaia = arriviSalvati[doorRif];
                 if (voceBaia && voceBaia.orario) {
                     const d = new Date(voceBaia.orario);
                     if (!isNaN(d.getTime())) arrivoPortaReale = d;
@@ -3759,7 +3760,7 @@
             }
             if (!infoCutoff && baiaSelezionata === baia.doorNumber) {
                 assicuraTabInbound();
-                infoCutoff = leggiCutoffBaiaCorrente();
+                infoCutoff = leggiCutoffBaiaCorrente(baia.doorNumber);
                 if (infoCutoff) impostaCacheCutoffBaia(baia.doorNumber, infoCutoff.cutoff, infoCutoff.codice);
             }
             if (!infoCutoff) continue;
