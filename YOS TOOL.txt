@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.29
+// @version      3.30
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -383,8 +383,38 @@
             _pollBlacklist401.clear();
         }
     }
-    function gestisciRispostaIntercettata(url, testoBody) {
+    let contatore401Yos = 0;
+    function segnalaStatoSessioneYos(scaduta) {
+        creaBadgeSync();
+        const wrapper = document.getElementById("tnt-top-badges");
+        if (!wrapper) return;
+        let badge = document.getElementById("tnt-badge-yos-sessione");
+        if (!scaduta) {
+            if (badge) badge.remove();
+            return;
+        }
+        if (!badge) {
+            badge = document.createElement("div");
+            badge.id = "tnt-badge-yos-sessione";
+            badge.style.cssText = "display:flex;align-items:center;gap:6px;background:#3a1a1a;border:1px solid #E24B4A;border-radius:12px;padding:4px 10px;font-size:11px;color:#FFD5D5;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);";
+            badge.textContent = "\u26a0 Sessione YOS scaduta, dati fermi \u2014 rifai il login";
+            wrapper.appendChild(badge);
+        }
+    }
+    function gestisciRispostaIntercettata(url, testoBody, status) {
         const urlStr = String(url || "");
+        if (status === 401 || status === 403) {
+            if (/dockingDoors|movement-management|parkingBay/.test(urlStr)) {
+                contatore401Yos++;
+                if (contatore401Yos >= 3) segnalaStatoSessioneYos(true);
+            }
+            return;
+        }
+        if (contatore401Yos > 0) {
+            contatore401Yos = 0;
+            segnalaStatoSessioneYos(false);
+        }
+        if (!testoBody) return;
         try {
             if (urlStr.indexOf("dockingDoors") !== -1) {
                 urlDockingDoorsViste.add(urlStr);
@@ -426,7 +456,7 @@
             } catch (e) { registraErroreSilenzioso(e); }
             this.addEventListener("load", function() {
                 try {
-                    gestisciRispostaIntercettata(this._tntUrl, this.responseText);
+                    if (this.responseType === "" || this.responseType === "text") gestisciRispostaIntercettata(this._tntUrl, this.responseText, this.status);
                 } catch (e) { registraErroreSilenzioso(e); }
             });
             return origSend.apply(this, arguments);
@@ -445,7 +475,7 @@
                 try {
                     response.clone().text().then(testo => {
                         try {
-                            gestisciRispostaIntercettata(url, testo);
+                            gestisciRispostaIntercettata(url, testo, response.status);
                         } catch (e) { registraErroreSilenzioso(e); }
                     }).catch(() => {});
                 } catch (e) { registraErroreSilenzioso(e); }
@@ -473,9 +503,17 @@
                 });
                 if (risp.status === 401 || risp.status === 403) {
                     _pollBlacklist401.set(url, Date.now() + BLOCCO_401_MS);
+                    contatore401Yos++;
+                    if (contatore401Yos >= 3) segnalaStatoSessioneYos(true);
                     return;
                 }
-                if (risp.ok) _pollCooldown.set(url, Date.now());
+                if (risp.ok) {
+                    _pollCooldown.set(url, Date.now());
+                    if (contatore401Yos > 0) {
+                        contatore401Yos = 0;
+                        segnalaStatoSessioneYos(false);
+                    }
+                }
                 const testo = await risp.text();
                 gestisciRispostaIntercettata(url, testo);
             } catch (e) { registraErroreSilenzioso(e); }
