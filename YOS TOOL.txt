@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.31
+// @version      3.32
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -1037,6 +1037,7 @@
     const unitVerificatiCutoff = new Set;
     const codaVerificaBaie = [];
     let codaInLavorazione = false;
+    let automazioneClickInCorso = false;
     function elementoIndicaShunterReale(wrapper) {
         if (!wrapper) return false;
         const el = wrapper.querySelector('[class*="shunter"]');
@@ -1255,6 +1256,7 @@
             }
             const baiaPrecedente = baiaSelezionata;
             const tabOutboundPrecedente = [ ...document.querySelectorAll(".door-info__header--nav-text") ].some(el => el.textContent.trim() === "OUTBOUND" && el.classList.contains("door-info__header--nav-text--selected"));
+            automazioneClickInCorso = true;
             simulaClickReale(wrapper);
             await new Promise(r => setTimeout(r, 900));
             assicuraTabInbound();
@@ -1295,6 +1297,7 @@
                 }
             }
         } catch (e) { registraErroreSilenzioso(e); }
+        automazioneClickInCorso = false;
         codaInLavorazione = false;
     }
     const codeMap = {
@@ -3952,6 +3955,8 @@
         scansionaBaieScarico(body);
     }
     async function forzaRefreshOrologioScaricoManuale(body) {
+        cacheCutoffPerBaia.clear();
+        unitVerificatiCutoff.clear();
         await forzaRefreshOrologioScarico(body);
         accodaBaieOccupateNonRegistrate();
         accodaBaieSenzaCutoff();
@@ -4090,7 +4095,7 @@
             const btn2 = creaIconaMenu("tnt-orologio-scarico-btn", "#ffffff", disegnoScarico);
             btn2.title = "Carichi in scadenza cutoff (Scarico)";
             menu.appendChild(btn2);
-            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", COLORE_SEZIONE_SCARICO, () => location.reload());
+            const panel2 = creaPannello("tnt-orologio-scarico-panel", "Scarico - cutoff in scadenza", COLORE_SEZIONE_SCARICO, () => forzaRefreshOrologioScaricoManuale(document.getElementById("tnt-orologio-scarico-panel-body")));
             const body2 = document.getElementById("tnt-orologio-scarico-panel-body");
             collegaClick(btn2, panel2, () => forzaRefreshOrologioScaricoManuale(body2), ORDINE_GRUPPO_CARICO_SCARICO);
         }
@@ -4163,6 +4168,7 @@
     window.addEventListener("resize", schedulaRiposizionamento);
     window.addEventListener("scroll", schedulaRiposizionamento, true);
     function aggiornaBaiaSelezionataDaEvento(e) {
+        if (automazioneClickInCorso) return;
         const wrapper = e.target.closest('[id^="unit_"]');
         if (!wrapper) return;
         const numEl = wrapper.querySelector(DOOR_NUM_SELECTOR_SCARICO);
