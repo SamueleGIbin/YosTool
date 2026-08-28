@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.35
+// @version      3.37
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -933,6 +933,10 @@
         salvaSessioniScarico(sessioni);
         pianificaSincronizzazione(5e3);
     }
+    const PRIORITA_AZIONE_TRACCIATA = {
+        LOCATION_ASSIGNED: 1,
+        START_UNLOADING: 2
+    };
     function elaboraRispostaDockingDoors(porte) {
         if (!Array.isArray(porte)) return;
         const arrivi = caricaArriviBaia();
@@ -959,7 +963,9 @@
                 if (sessionePrecedente && sessionePrecedente.unitId !== String(unitId)) chiudiSessioneScarico(doorNumber, (new Date).toISOString());
             }
             const azionePrecedente = esistente && esistente.action;
-            const transitaAdAzioneTracciata = (unit.currentAction === "START_UNLOADING" || unit.currentAction === "LOCATION_ASSIGNED") && azionePrecedente !== unit.currentAction;
+            const prioritaNuova = PRIORITA_AZIONE_TRACCIATA[unit.currentAction] || 0;
+            const prioritaPrecedente = PRIORITA_AZIONE_TRACCIATA[azionePrecedente] || 0;
+            const transitaAdAzioneTracciata = prioritaNuova > 0 && prioritaNuova > prioritaPrecedente;
             if (cambiaUnit || transitaAdAzioneTracciata) {
                 let orario;
                 if (unit.currentAction === "START_UNLOADING" && (unit.updatedDateTimestamp || unit.updatedDate)) {
@@ -1618,13 +1624,19 @@
         const offsetGiorni = giorno === 6 ? 1 : 0;
         return new Date(data.getFullYear(), data.getMonth(), data.getDate() + offsetGiorni, Math.floor(ORARIO_RIAPERTURA_DOMENICA_MINUTI / 60), ORARIO_RIAPERTURA_DOMENICA_MINUTI % 60, 0, 0);
     }
+    function slotCategoriaConChiusura(cat, d) {
+        const riapertura = prossimaAperturaSeChiuso(d);
+        if (!riapertura) return d;
+        let dSlot = new Date(riapertura.getFullYear(), riapertura.getMonth(), riapertura.getDate(), cat.cutoffOre, cat.cutoffMin, 0, 0);
+        if (dSlot.getTime() < riapertura.getTime()) dSlot.setDate(dSlot.getDate() + 1);
+        return dSlot;
+    }
     function trovaProssimoCutoffConMargine(cat, cutoffBase, arrivoPortaReale, margineMinimo) {
         const ancora = arrivoPortaReale && !isNaN(arrivoPortaReale.getTime()) && arrivoPortaReale.getTime() > cutoffBase.getTime() ? arrivoPortaReale : cutoffBase;
         const candidati = [];
         for (let offset = 0; offset <= 5; offset++) {
             let d = new Date(ancora.getFullYear(), ancora.getMonth(), ancora.getDate() + offset, cat.cutoffOre, cat.cutoffMin, 0, 0);
-            const riapertura = prossimaAperturaSeChiuso(d);
-            if (riapertura) d = riapertura;
+            d = slotCategoriaConChiusura(cat, d);
             if (d.getTime() > cutoffBase.getTime()) candidati.push(d);
         }
         candidati.sort((a, b) => a.getTime() - b.getTime());
@@ -1642,8 +1654,7 @@
         candidati.forEach(cat => {
             for (let offset = -1; offset <= 5; offset++) {
                 let d = new Date(arrivo.getFullYear(), arrivo.getMonth(), arrivo.getDate() + offset, cat.cutoffOre, cat.cutoffMin, 0, 0);
-                const riapertura = prossimaAperturaSeChiuso(d);
-                if (riapertura) d = riapertura;
+                d = slotCategoriaConChiusura(cat, d);
                 if (d.getTime() >= arrivo.getTime()) {
                     choices.push({
                         cat: cat,
@@ -2445,7 +2456,7 @@
     async function pulisciJobSplunkVecchi(csrfInfo) {
         try {
             const sids = await elencaJobSplunk(csrfInfo);
-            for (const sid of sids) await eliminaJobSplunk(sid, csrfInfo);
+            await Promise.all(sids.map(sid => eliminaJobSplunk(sid, csrfInfo)));
         } catch (e) { registraErroreSilenzioso(e); }
     }
     async function recuperaColliDaSplunk() {
@@ -2483,8 +2494,6 @@
     }
     let ultimoErroreColli = null;
     let aggiornamentoColliInCorso = false;
-    let ultimoClickAggiornaColliTs = 0;
-    const COOLDOWN_AGGIORNA_COLLI_MS = 6e4;
     async function aggiornaColliAutomatico() {
         if (aggiornamentoColliInCorso) return;
         aggiornamentoColliInCorso = true;
@@ -2551,14 +2560,12 @@
             const d = new Date(locale.aggiornatoIl);
             aggiornatoTxt = "Colli aggiornati alle ore " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") + " del " + String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0");
         }
-        const restanteCooldown = COOLDOWN_AGGIORNA_COLLI_MS - (Date.now() - ultimoClickAggiornaColliTs);
-        const cooldownAttivo = aggiornamentoColliInCorso || restanteCooldown > 0;
-        const testoBtnAggiorna = aggiornamentoColliInCorso ? "Aggiorno..." : restanteCooldown > 0 ? "Attendi " + Math.ceil(restanteCooldown / 1000) + "s" : "Aggiorna ora";
+        const cooldownAttivo = aggiornamentoColliInCorso;
+        const testoBtnAggiorna = aggiornamentoColliInCorso ? "Aggiorno..." : "Aggiorna ora";
         body.innerHTML = "<div class=\"tnt-card\"><div class=\"tnt-card-title\">" + statoTxt + "</div><div class=\"tnt-card-sub\">" + aggiornatoTxt + "</div><div class=\"tnt-card-sub\">Dati dalle ore " + hhI + ":" + mmI + "</div></div>" + (ultimoErroreColli ? '<div style="font-size:11px;color:#E24B4A;margin-bottom:8px;">Aggiornamento automatico non riuscito: ' + escapeHtml(ultimoErroreColli) + "</div>" : "") + "<button id=\"tnt-colli-aggiorna-ora\" class=\"tnt-btn-primary\"" + (cooldownAttivo ? " disabled style=\"opacity:.5;cursor:not-allowed;\"" : "") + ">" + testoBtnAggiorna + "</button><label style=\"display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;\"><input type=\"checkbox\" id=\"tnt-colli-auto\" " + (imp.auto ? "checked" : "") + "> Aggiornamento automatico ogni 30 min</label><label style=\"display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-size:12px;color:#c7c7cc;\"><input type=\"checkbox\" id=\"tnt-colli-manuale\" " + (imp.manuale ? "checked" : "") + "> Imposta a mano da che ora prendere i dati</label><div style=\"display:flex;gap:6px;margin:0 0 10px;\"><input type=\"date\" id=\"tnt-colli-data-manuale\" value=\"" + (imp.dataManuale || (new Date).toISOString().slice(0, 10)) + "\" " + (imp.manuale ? "" : "disabled") + " style=\"flex:1;box-sizing:border-box;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;\"><input type=\"time\" id=\"tnt-colli-orario-manuale\" value=\"" + imp.orarioManuale + "\" " + (imp.manuale ? "" : "disabled") + " style=\"flex:1;box-sizing:border-box;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;font-family:Roboto,sans-serif;font-size:13px;\"></div><a href=\"" + costruisciUrlSplunk() + "\" target=\"_blank\" rel=\"noopener\" style=\"display:block;font-size:12px;color:#8B5CF6;margin:4px 0 10px;\">Apri la stessa ricerca su Splunk &#8599;</a>";
         document.getElementById("tnt-colli-aggiorna-ora").addEventListener("click", e => {
             e.stopPropagation();
-            if (aggiornamentoColliInCorso || Date.now() - ultimoClickAggiornaColliTs < COOLDOWN_AGGIORNA_COLLI_MS) return;
-            ultimoClickAggiornaColliTs = Date.now();
+            if (aggiornamentoColliInCorso) return;
             aggiornaColliAutomatico();
             renderPannelloProduttivita(body);
         });
@@ -4033,9 +4040,12 @@
         return !!panel && panel.style.display !== "none" && panel.style.display !== "";
     }
     const ORDINE_GRUPPO_CARICO_SCARICO = [ "tnt-orologio-panel", "tnt-orologio-scarico-panel" ];
-    function posizionaPannelliGruppo(ordineIds) {
+    function posizionaPannelliGruppo(ordineIds, tentativi) {
         const menu = document.querySelector(".cc-hub-menu-panel");
-        if (!menu) return;
+        if (!menu) {
+            if ((tentativi || 0) < 15) requestAnimationFrame(() => posizionaPannelliGruppo(ordineIds, (tentativi || 0) + 1));
+            return;
+        }
         const rectMenu = menu.getBoundingClientRect();
         const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
         let leftCorrente = rectMenu.right;
@@ -4048,9 +4058,13 @@
             leftCorrente += p.getBoundingClientRect().width;
         });
     }
-    function posizionaPannelloSingolo(panel) {
+    function posizionaPannelloSingolo(panel, tentativi) {
         const menu = document.querySelector(".cc-hub-menu-panel");
-        const rectMenu = menu ? menu.getBoundingClientRect() : panel.getBoundingClientRect();
+        if (!menu) {
+            if ((tentativi || 0) < 15) requestAnimationFrame(() => posizionaPannelloSingolo(panel, (tentativi || 0) + 1));
+            return;
+        }
+        const rectMenu = menu.getBoundingClientRect();
         const altezzaDisponibile = window.innerHeight - rectMenu.top - 12;
         panel.style.top = rectMenu.top + "px";
         panel.style.left = rectMenu.right + "px";
