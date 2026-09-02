@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.40
+// @version      3.41
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Cambio Cutoff manuale legato a cassa + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -3346,11 +3346,15 @@
             return cat === "Scarico" || cat === "Parcheggio";
         });
         const camionPresiInCarico = storico.filter(r => categoriaBaia(r.doorNumber) === "Scarico").length;
+        const perLatoCalcolato = calcolaTempoScaricoPerLato(dataInizioStr, oraInizioStr, dataFineStr, oraFineStr);
+        const camionScaricoCompletato = perLatoCalcolato.reduce((acc, r) => acc + (r.campioni || 0), 0);
         return {
             totaleRecord: storicoScaricoParcheggio.length,
             camionPresiInCarico: camionPresiInCarico,
+            camionScaricoCompletato: camionScaricoCompletato,
+            camionScaricoAltro: Math.max(0, camionPresiInCarico - camionScaricoCompletato),
             attesaParcheggio: calcolaAttesaMediaParcheggio(storico),
-            perLato: calcolaTempoScaricoPerLato(dataInizioStr, oraInizioStr, dataFineStr, oraFineStr),
+            perLato: perLatoCalcolato,
             perBaia: calcolaTempoScaricoPerBaia(dataInizioStr, oraInizioStr, dataFineStr, oraFineStr),
             perTurno: calcolaRitardiPer(storicoScaricoParcheggio, r => r.cutoffTurno),
             perCliente: calcolaRitardiPer(storicoScaricoParcheggio, r => r.codiceOrigine, "percentuale"),
@@ -3479,7 +3483,7 @@
                 });
             }
             html += '<div class="tnt-group-label">Camion presi in carico nel periodo</div>';
-            html += '<div class="tnt-card"><div class="tnt-card-title">' + stat.camionPresiInCarico + ' camion</div><div class="tnt-card-sub">assegnati a una baia di Scarico nel periodo selezionato</div></div>';
+            html += '<div class="tnt-card"><div class="tnt-card-title">' + stat.camionPresiInCarico + ' camion</div><div class="tnt-card-sub">assegnati a una baia di Scarico nel periodo selezionato</div><div class="tnt-card-sub">di cui ' + stat.camionScaricoCompletato + ' con scarico completato (vedi dettaglio per lato) e ' + stat.camionScaricoAltro + ' ancora in corso, su buffer o senza sessione completata nel periodo</div></div>';
             cont.innerHTML = html;
         }
         document.getElementById("tnt-stat-btn-calcola").addEventListener("click", e => {
@@ -3555,11 +3559,37 @@
         }
         return null;
     }
+    function aggiornaSoloCountdown(riga, risultato) {
+        const valSpan = riga.querySelector(".tnt-col-countdown .door-info__movmt-value");
+        if (!valSpan) return;
+        let valoreCountdown = "N/A";
+        let colore = "#FF7A00";
+        if (risultato && risultato.cutoffDate) {
+            const diffMs = risultato.cutoffDate.getTime() - (new Date).getTime();
+            if (diffMs > 0) {
+                const diffMinsTot = Math.floor(diffMs / 6e4);
+                const ore = Math.floor(diffMinsTot / 60);
+                const minuti = diffMinsTot % 60;
+                valoreCountdown = ore > 0 ? `${ore}h ${minuti}m` : `${minuti}m`;
+                colore = diffMs <= 30 * 6e4 ? "#ffcc00" : "#4cd964";
+            } else {
+                const diffMinsTot = Math.floor(Math.abs(diffMs) / 6e4);
+                const ore = Math.floor(diffMinsTot / 60);
+                const minuti = diffMinsTot % 60;
+                valoreCountdown = `In ritardo di ${ore > 0 ? ore + "h " : ""}${minuti}m`;
+                colore = "#ff3b30";
+            }
+        }
+        valSpan.textContent = valoreCountdown;
+        valSpan.style.color = colore;
+    }
     function aggiornaRigaArrivoECountdown(ambito, risultato, eBaiaCarico) {
-        const vecchia = ambito.querySelector(".tnt-custom-info-row");
-        if (vecchia) vecchia.remove();
         const rigaRemarks = trovaRigaPerChiavi(ambito, [ "Arrival Remarks", "YOS Remarks" ]);
-        if (!rigaRemarks) return;
+        if (!rigaRemarks) {
+            const vecchiaAssente = ambito.querySelector(".tnt-custom-info-row");
+            if (vecchiaAssente) vecchiaAssente.remove();
+            return;
+        }
         let valoreArrivo = "N/A";
         if (baiaSelezionata) {
             const arrivi = caricaArriviBaia();
@@ -3569,12 +3599,25 @@
                 valoreArrivo = String(dataArrivo.getHours()).padStart(2, "0") + ":" + String(dataArrivo.getMinutes()).padStart(2, "0");
             }
         }
+        const overrideAttivoUI = baiaSelezionata && leggiCutoffManualeValido(baiaSelezionata);
+        const chiaveContenuto = [ baiaSelezionata || "", eBaiaCarico ? "1" : "0", valoreArrivo, risultato && risultato.manuale ? "1" : "0", overrideAttivoUI ? overrideAttivoUI.categoria : "" ].join("|");
+        const rigaEsistente = ambito.querySelector(".tnt-custom-info-row");
+        if (rigaEsistente && rigaEsistente.getAttribute("data-tnt-info-key") === chiaveContenuto) {
+            if (!eBaiaCarico) aggiornaSoloCountdown(rigaEsistente, risultato);
+            return;
+        }
+        if (rigaEsistente) rigaEsistente.remove();
         const rigaNuova = document.createElement("div");
         rigaNuova.className = "row door-info__movmt-section-row tnt-custom-info-row";
         rigaNuova.style.marginTop = "10px";
+        rigaNuova.setAttribute("data-tnt-info-key", chiaveContenuto);
         if (eBaiaCarico) {
             rigaNuova.appendChild(creaColTurno("Orario Arrivo Camion", valoreArrivo, "col-12"));
             rigaRemarks.insertAdjacentElement("afterend", rigaNuova);
+            const vecchioBadLoadingCarico = ambito.querySelector(".tnt-bad-loading-row");
+            if (vecchioBadLoadingCarico) vecchioBadLoadingCarico.remove();
+            const vecchiaRigaCutoffManualeCarico = ambito.querySelector(".tnt-cutoff-manuale-row");
+            if (vecchiaRigaCutoffManualeCarico) vecchiaRigaCutoffManualeCarico.remove();
             return;
         }
         let valoreCountdown = "N/A";
@@ -3594,6 +3637,7 @@
         }
         const colArrivo = creaColTurno("Orario Arrivo Camion", valoreArrivo, "col-6");
         const colCountdown = creaColTurno("Countdown Cutoff", valoreCountdown, "col-6");
+        colCountdown.classList.add("tnt-col-countdown");
         const valSpan = colCountdown.querySelector(".door-info__movmt-value");
         if (valSpan && risultato && risultato.cutoffDate) {
             const diffMs = risultato.cutoffDate.getTime() - (new Date).getTime();
@@ -3805,13 +3849,13 @@
         colBtnCutoff.appendChild(selectCutoff);
         rigaBadLoading.appendChild(colBtnCutoff);
         rigaNuova.insertAdjacentElement("afterend", rigaBadLoading);
-        const overrideAttivoUI = baiaSelezionata && leggiCutoffManualeValido(baiaSelezionata);
-        if (overrideAttivoUI) {
+        const overrideAttivoUIFinale = baiaSelezionata && leggiCutoffManualeValido(baiaSelezionata);
+        if (overrideAttivoUIFinale) {
             const rigaRipristina = document.createElement("div");
             rigaRipristina.className = "row door-info__movmt-section-row tnt-cutoff-manuale-row";
             rigaRipristina.style.marginTop = "6px";
             const btnRipristina = document.createElement("button");
-            btnRipristina.textContent = "↺ Ripristina cutoff (" + overrideAttivoUI.categoria + ")";
+            btnRipristina.textContent = "↺ Ripristina cutoff (" + overrideAttivoUIFinale.categoria + ")";
             btnRipristina.style.cssText = "background:#3a3a3c;color:#FFCC66;border:1px solid #e67e22;border-radius:5px;padding:3px 6px;font-size:10px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;";
             btnRipristina.addEventListener("click", async e => {
                 e.stopPropagation();
@@ -4361,6 +4405,7 @@
         }
     }
     document.addEventListener("click", e => {
+        if (!e.isTrusted) return;
         if (e.target.closest(".tnt-panel") || e.target.closest(".cc-menu-button") || e.target.closest("#tnt-badge-colli")) return;
         chiudiPannelliEsclusi(ORDINE_GRUPPO_CARICO_SCARICO.concat([ "tnt-colli-panel" ]));
     });
