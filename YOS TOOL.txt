@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.39
-// @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
+// @version      3.40
+// @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Cambio Cutoff manuale legato a cassa + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
 // @match        https://forms.cloud.microsoft/*
@@ -538,6 +538,120 @@
             localStorage.setItem(STORAGE_KEY_BUFFER_MANUALE, JSON.stringify(obj));
         } catch (e) { registraErroreSilenzioso(e); }
     }
+    const cutoffManualeBaie = new Map;
+    const STORAGE_KEY_CUTOFF_MANUALE = "tnt_cutoff_manuale_v1";
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY_CUTOFF_MANUALE);
+        const obj = raw ? JSON.parse(raw) : {};
+        Object.keys(obj).forEach(k => cutoffManualeBaie.set(k, obj[k]));
+    } catch (e) { registraErroreSilenzioso(e); }
+    function salvaCutoffManualeSuStorage() {
+        try {
+            const obj = {};
+            cutoffManualeBaie.forEach((v, k) => {
+                obj[k] = v;
+            });
+            localStorage.setItem(STORAGE_KEY_CUTOFF_MANUALE, JSON.stringify(obj));
+        } catch (e) { registraErroreSilenzioso(e); }
+    }
+    function leggiCutoffManualeValido(doorNumber) {
+        if (!doorNumber) return null;
+        const voceOverride = cutoffManualeBaie.get(doorNumber);
+        if (!voceOverride) return null;
+        const arrivoAttuale = caricaArriviBaia()[doorNumber];
+        if (!arrivoAttuale || !arrivoAttuale.unitId || String(arrivoAttuale.unitId) !== String(voceOverride.unitId)) {
+            cutoffManualeBaie.delete(doorNumber);
+            salvaCutoffManualeSuStorage();
+            return null;
+        }
+        return voceOverride;
+    }
+    async function impostaCutoffManuale(doorNumber, nomeCategoria) {
+        if (!doorNumber || !nomeCategoria) return;
+        const voceArrivo = caricaArriviBaia()[doorNumber];
+        if (!voceArrivo || !voceArrivo.unitId) return;
+        const voce = {
+            unitId: String(voceArrivo.unitId),
+            categoria: nomeCategoria,
+            ts: (new Date).toISOString()
+        };
+        cutoffManualeBaie.set(doorNumber, voce);
+        cacheCutoffPerBaia.delete(doorNumber);
+        unitVerificatiCutoff.delete(String(voceArrivo.unitId));
+        salvaCutoffManualeSuStorage();
+        aggiornaPannelloScaricoSeAperto();
+        try {
+            processaTripDetails();
+        } catch (e) { registraErroreSilenzioso(e); }
+        try {
+            const token = await otteniIdTokenValido();
+            const url = FIREBASE_SYNC.BASE_URL + "/cutoffManuale/" + doorNumber + ".json?auth=" + token;
+            await fetch(url, {
+                method: "PUT",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(voce)
+            });
+        } catch (e) { registraErroreSilenzioso(e); }
+    }
+    async function ripristinaCutoff(doorNumber) {
+        if (!doorNumber || !cutoffManualeBaie.has(doorNumber)) return;
+        cutoffManualeBaie.delete(doorNumber);
+        cacheCutoffPerBaia.delete(doorNumber);
+        try {
+            const voceArrivo = caricaArriviBaia()[doorNumber];
+            if (voceArrivo && voceArrivo.unitId) unitVerificatiCutoff.delete(String(voceArrivo.unitId));
+        } catch (e) { registraErroreSilenzioso(e); }
+        salvaCutoffManualeSuStorage();
+        aggiornaPannelloScaricoSeAperto();
+        try {
+            processaTripDetails();
+        } catch (e) { registraErroreSilenzioso(e); }
+        try {
+            const token = await otteniIdTokenValido();
+            const url = FIREBASE_SYNC.BASE_URL + "/cutoffManuale/" + doorNumber + ".json?auth=" + token;
+            await fetch(url, {
+                method: "DELETE"
+            });
+        } catch (e) { registraErroreSilenzioso(e); }
+    }
+    async function sincronizzaCutoffManuale() {
+        if (!FIREBASE_SYNC.ATTIVO) return;
+        try {
+            const token = await otteniIdTokenValido();
+            const url = FIREBASE_SYNC.BASE_URL + "/cutoffManuale.json?auth=" + token;
+            const res = await fetch(url, {
+                cache: "no-store"
+            });
+            if (!res.ok) return;
+            const remoto = await res.json();
+            if (!remoto || typeof remoto !== "object") return;
+            let modificato = false;
+            Object.keys(remoto).forEach(k => {
+                const attuale = cutoffManualeBaie.get(k);
+                if (!attuale || attuale.ts !== remoto[k].ts) {
+                    cutoffManualeBaie.set(k, remoto[k]);
+                    cacheCutoffPerBaia.delete(k);
+                    modificato = true;
+                }
+            });
+            [ ...cutoffManualeBaie.keys() ].forEach(k => {
+                if (!remoto[k]) {
+                    cutoffManualeBaie.delete(k);
+                    cacheCutoffPerBaia.delete(k);
+                    modificato = true;
+                }
+            });
+            if (modificato) {
+                salvaCutoffManualeSuStorage();
+                aggiornaPannelloScaricoSeAperto();
+                try {
+                    processaTripDetails();
+                } catch (e) { registraErroreSilenzioso(e); }
+            }
+        } catch (e) { registraErroreSilenzioso(e); }
+    }
     function baiaBloccataScarico(doorNumber) {
         if (bufferManualeBaie.has(doorNumber)) return true;
         return remarksEsclusiOrologio(cacheRemarksPerBaia.get(doorNumber));
@@ -790,16 +904,33 @@
         const voce = arrivi[doorNumber];
         if (!voce || !voce.unitId) return null;
         const mov = cacheMovimentiPerUnit.get(String(voce.unitId));
-        if (!mov || !mov.origin) return null;
-        const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
-        if (!arrivoIso) return null;
-        const arrivo = new Date(arrivoIso);
-        if (isNaN(arrivo.getTime())) return null;
         let arrivoPortaReale = null;
         if (voce.orario) {
             const d = new Date(voce.orario);
             if (!isNaN(d.getTime())) arrivoPortaReale = d;
         }
+        const overrideValido = leggiCutoffManualeValido(doorNumber);
+        if (overrideValido) {
+            const catForzata = CATEGORIE.find(c => c.nome === overrideValido.categoria);
+            if (catForzata) {
+                const arrivoIsoOv = mov ? mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival : null;
+                let arrivoOv = arrivoIsoOv ? new Date(arrivoIsoOv) : null;
+                if (!arrivoOv || isNaN(arrivoOv.getTime())) arrivoOv = arrivoPortaReale || new Date;
+                const forzato = calcolaCutoffDaCandidati([ catForzata ], arrivoOv, arrivoPortaReale, MARGINE_MINIMO_DOMESTICO_MINUTI);
+                if (forzato) {
+                    forzato.manuale = true;
+                    return {
+                        cutoff: forzato,
+                        codice: mov ? mov.origin : null
+                    };
+                }
+            }
+        }
+        if (!mov || !mov.origin) return null;
+        const arrivoIso = mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival;
+        if (!arrivoIso) return null;
+        const arrivo = new Date(arrivoIso);
+        if (isNaN(arrivo.getTime())) return null;
         const risultato = calcolaCutoffPerCodice(mov.origin, arrivo, arrivoPortaReale);
         if (!risultato) return null;
         return {
@@ -1643,9 +1774,7 @@
         }
         return candidati.length > 0 ? candidati[candidati.length - 1] : null;
     }
-    function calcolaCutoffPerCodice(codice, arrivo, arrivoPortaReale) {
-        const margineMinimo = margineMinimoPerCodice(codice);
-        const candidati = CATEGORIE.filter(c => c.codici.includes(codice));
+    function calcolaCutoffDaCandidati(candidati, arrivo, arrivoPortaReale, margineMinimo) {
         if (candidati.length === 0) return null;
         const choices = [];
         candidati.forEach(cat => {
@@ -1698,6 +1827,11 @@
         }
         if (risultato) risultato.margineMinimo = margineMinimo;
         return risultato;
+    }
+    function calcolaCutoffPerCodice(codice, arrivo, arrivoPortaReale) {
+        const margineMinimo = margineMinimoPerCodice(codice);
+        const candidati = CATEGORIE.filter(c => c.codici.includes(codice));
+        return calcolaCutoffDaCandidati(candidati, arrivo, arrivoPortaReale, margineMinimo);
     }
     const stileBlink = document.createElement("style");
     stileBlink.textContent = [ "@keyframes tntBlinkRosso{0%,100%{opacity:1;}50%{opacity:0.15;}}", ".tnt-dot-rosso{display:inline-block;width:9px;height:9px;border-radius:50%;background:#E24B4A;margin-right:8px;animation:tntBlinkRosso 1s infinite;flex-shrink:0;}", ".tnt-dot-giallo{display:inline-block;width:9px;height:9px;border-radius:50%;background:#FAC775;margin-right:8px;animation:tntBlinkRosso 1.4s infinite;flex-shrink:0;}", ".tnt-panel{position:fixed;display:none;flex-direction:column;background:#1c1c1e;border-left:1px solid #333;box-shadow:-6px 0 18px rgba(0,0,0,0.45);z-index:99999;font-family:Roboto,sans-serif;color:#f2f2f2;transform:translateZ(0);-webkit-transform:translateZ(0);backface-visibility:hidden;}", ".tnt-panel-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #2c2c2e;flex:0 0 auto;}", ".tnt-panel-title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;color:#f2f2f2;}", ".tnt-panel-close{cursor:pointer;color:#c7c7cc;font-size:18px;line-height:1;padding:2px 6px;border-radius:4px;}", ".tnt-panel-close:hover{background:#2c2c2e;color:#ffffff;}", ".tnt-panel-refresh{cursor:pointer;color:#c7c7cc;font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;}", ".tnt-panel-refresh:hover{background:#2c2c2e;color:#ffffff;}", ".tnt-panel-refresh.tnt-refresh-ok{color:#34C759;}", ".tnt-panel-body{flex:1 1 auto;overflow-y:auto;padding:10px;transform:translateZ(0);-webkit-transform:translateZ(0);will-change:transform;contain:layout paint style;}", ".tnt-group-label{color:#c7c7cc;font-size:11px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;padding:10px 6px 6px;}", ".tnt-group-label:first-child{padding-top:2px;}", ".tnt-card{background:#2e2e31;border-left:3px solid #777;border-radius:0 8px 8px 0;padding:9px 12px;margin-bottom:6px;}", ".tnt-card-row{display:flex;align-items:center;justify-content:space-between;gap:8px;}", ".tnt-card-title{color:#ffffff;font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}", ".tnt-card-sub{color:#d5d5da;font-size:11px;margin-top:4px;line-height:1.4;}", ".tnt-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;flex-shrink:0;}", ".tnt-card-rosso{border-left-color:#E24B4A;}", ".tnt-card-rosso .tnt-badge{background:#5c1717;color:#FFD5D5;}", ".tnt-card-ambra{border-left-color:#FAC775;}", ".tnt-card-ambra .tnt-badge{background:#4d2c04;color:#FFE1AD;}", ".tnt-card-verde{border-left-color:#5DCAA5;}", ".tnt-card-verde .tnt-badge{background:#043d33;color:#BFF3DF;}", ".tnt-card-delta{font-size:11px;margin-top:3px;font-weight:700;}", ".tnt-delta-rosso{color:#FF9B9B;}", ".tnt-delta-verde{color:#8CE6C7;}", ".tnt-delta-neutro{color:#c7c7cc;}", ".tnt-empty{padding:16px 8px;opacity:0.85;font-family:Roboto,sans-serif;color:#e2e2e5;font-size:13px;text-align:center;}", ".tnt-footnote{margin:8px 6px 4px;padding:9px 11px;border-radius:6px;background:#4d2c04;font-size:12px;font-weight:600;line-height:1.45;color:#FFE1AD;font-family:Roboto,sans-serif;}", ".tnt-banner-ritardo{margin-top:10px;padding:10px 12px;border-radius:6px;background:#4d2c04;color:#FFE1AD;font-size:13px;font-weight:600;line-height:1.45;font-family:Roboto,sans-serif;}", ".tnt-banner-ritardo strong{color:#FFCC66;font-size:14px;}", ".tnt-panel-body label{display:block;font-size:12px;margin-bottom:3px;color:#c7c7cc;}", ".tnt-panel-body input[type=date]{width:100%;margin-bottom:12px;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;box-sizing:border-box;}", ".tnt-panel-body input[type=time]{width:100%;margin-bottom:12px;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;box-sizing:border-box;}", ".tnt-riga-data-ora{display:flex;gap:6px;}", ".tnt-riga-data-ora input[type=date]{flex:1 1 60%;}", ".tnt-riga-data-ora input[type=time]{flex:1 1 40%;}", ".tnt-panel-body button{width:100%;padding:9px;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;margin-bottom:8px;border:none;}", ".tnt-btn-primary{background:#FF7A00;color:#1c1c1e;}", ".tnt-btn-secondary{background:#2c2c2e;color:#f2f2f2;border:1px solid #444 !important;}", ".cc-menu-divider{height:1px;background:#3a3a3c;margin:14px 10px 0;}", ".cc-menu-section-label{font-family:Roboto,sans-serif;font-size:9px;font-weight:700;letter-spacing:0.7px;text-transform:uppercase;text-align:center;margin:8px 4px 0;}", ".tnt-panel-body input[type=text]{width:100%;margin-bottom:10px;padding:7px 8px;border-radius:6px;border:1px solid #444;background:#2e2e31;color:#ffffff;box-sizing:border-box;font-family:Roboto,sans-serif;font-size:13px;}", ".tnt-dest-row{display:flex;align-items:center;justify-content:space-between;background:#2e2e31;border-radius:6px;padding:6px 10px;margin-bottom:4px;font-family:Roboto,sans-serif;}", ".tnt-dest-codice{color:#8B5CF6;font-weight:700;font-size:12px;}", ".tnt-dest-nome{color:#d5d5da;font-size:12px;}" ].join("");
@@ -1846,6 +1980,19 @@
                         if (arrivo && !eBaiaCarico) {
                             risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo, arrivoPortaReale);
                         }
+                        if (arrivo && !eBaiaCarico && baiaSelezionata) {
+                            const overrideValido = leggiCutoffManualeValido(baiaSelezionata);
+                            if (overrideValido) {
+                                const catForzata = CATEGORIE.find(c => c.nome === overrideValido.categoria);
+                                if (catForzata) {
+                                    const forzato = calcolaCutoffDaCandidati([ catForzata ], arrivo, arrivoPortaReale, MARGINE_MINIMO_DOMESTICO_MINUTI);
+                                    if (forzato) {
+                                        forzato.manuale = true;
+                                        risultato = forzato;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 if (baiaSelezionata && codiceOrigine && !eBaiaCarico) registraArrivoDaTripDetailsSeMancante(baiaSelezionata, codiceOrigine, tripId, testoActualArrivo, risultato);
@@ -1865,7 +2012,7 @@
                 riga.className = "row door-info__movmt-section-row tnt-turno-row";
                 if (risultato) {
                     riga.appendChild(creaColTurno("Turno", risultato.cat.turno));
-                    riga.appendChild(creaColTurno("Tipo Cutoff", risultato.cat.nome));
+                    riga.appendChild(creaColTurno("Tipo Cutoff", risultato.cat.nome + (risultato.manuale ? " (manuale)" : "")));
                     const hh = String(risultato.cutoffDate.getHours()).padStart(2, "0");
                     const mm = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
                     riga.appendChild(creaColTurno("Orario Cutoff", hh + ":" + mm));
@@ -3457,6 +3604,8 @@
         rigaRemarks.insertAdjacentElement("afterend", rigaNuova);
         const vecchioBadLoading = ambito.querySelector(".tnt-bad-loading-row");
         if (vecchioBadLoading) vecchioBadLoading.remove();
+        const vecchiaRigaCutoffManuale = ambito.querySelector(".tnt-cutoff-manuale-row");
+        if (vecchiaRigaCutoffManuale) vecchiaRigaCutoffManuale.remove();
         const contenitoreBL = ambito.closest(".door-info__movmt-no-left-padding");
         if (!contenitoreBL) return;
         const sezioneBL = contenitoreBL.querySelector(".door-info__movmt-section");
@@ -3619,7 +3768,59 @@
         });
         colBtnBuf.appendChild(btnBuf);
         rigaBadLoading.appendChild(colBtnBuf);
+        const colBtnCutoff = document.createElement("div");
+        colBtnCutoff.style.flex = "1";
+        colBtnCutoff.style.position = "relative";
+        const btnCutoff = document.createElement("button");
+        btnCutoff.textContent = "Cambia Cutoff";
+        btnCutoff.style.cssText = "background:#e67e22;color:#fff;border:none;border-radius:5px;padding:3px 6px;font-size:10px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;";
+        const selectCutoff = document.createElement("select");
+        selectCutoff.style.cssText = "position:absolute;top:100%;left:0;right:0;margin-top:4px;background:#2e2e31;color:#fff;border:1px solid #444;border-radius:5px;font-size:11px;padding:4px;z-index:10;display:none;box-sizing:border-box;";
+        const optDefaultCutoff = document.createElement("option");
+        optDefaultCutoff.value = "";
+        optDefaultCutoff.textContent = "Scegli tipo cutoff...";
+        selectCutoff.appendChild(optDefaultCutoff);
+        CATEGORIE.forEach(cat => {
+            const opt = document.createElement("option");
+            opt.value = cat.nome;
+            const hh = String(cat.cutoffOre).padStart(2, "0");
+            const mm = String(cat.cutoffMin).padStart(2, "0");
+            opt.textContent = cat.nome + " (" + hh + ":" + mm + ")";
+            selectCutoff.appendChild(opt);
+        });
+        btnCutoff.addEventListener("click", e => {
+            e.stopPropagation();
+            selectCutoff.style.display = selectCutoff.style.display === "none" ? "block" : "none";
+        });
+        selectCutoff.addEventListener("click", e => e.stopPropagation());
+        selectCutoff.addEventListener("change", async e => {
+            e.stopPropagation();
+            const nomeScelto = selectCutoff.value;
+            selectCutoff.style.display = "none";
+            selectCutoff.value = "";
+            if (!nomeScelto || !baiaSelezionata) return;
+            await impostaCutoffManuale(baiaSelezionata, nomeScelto);
+        });
+        colBtnCutoff.appendChild(btnCutoff);
+        colBtnCutoff.appendChild(selectCutoff);
+        rigaBadLoading.appendChild(colBtnCutoff);
         rigaNuova.insertAdjacentElement("afterend", rigaBadLoading);
+        const overrideAttivoUI = baiaSelezionata && leggiCutoffManualeValido(baiaSelezionata);
+        if (overrideAttivoUI) {
+            const rigaRipristina = document.createElement("div");
+            rigaRipristina.className = "row door-info__movmt-section-row tnt-cutoff-manuale-row";
+            rigaRipristina.style.marginTop = "6px";
+            const btnRipristina = document.createElement("button");
+            btnRipristina.textContent = "↺ Ripristina cutoff (" + overrideAttivoUI.categoria + ")";
+            btnRipristina.style.cssText = "background:#3a3a3c;color:#FFCC66;border:1px solid #e67e22;border-radius:5px;padding:3px 6px;font-size:10px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;";
+            btnRipristina.addEventListener("click", async e => {
+                e.stopPropagation();
+                if (!baiaSelezionata) return;
+                await ripristinaCutoff(baiaSelezionata);
+            });
+            rigaRipristina.appendChild(btnRipristina);
+            rigaBadLoading.insertAdjacentElement("afterend", rigaRipristina);
+        }
     }
     function assicuraTabInbound() {
         const nav = document.querySelectorAll(".door-info__header--nav-text");
@@ -4280,6 +4481,7 @@
         });
         avviaSchedulerPrincipale();
         sincronizzaBufferManuale();
+        sincronizzaCutoffManuale();
         pianificaSincronizzazione(3e3);
     }
     function avviaSchedulerPrincipale() {
@@ -4321,6 +4523,9 @@
             ms: 5e3
         }, {
             fn: sincronizzaBufferManuale,
+            ms: 2e4
+        }, {
+            fn: sincronizzaCutoffManuale,
             ms: 2e4
         }, {
             fn: accodaRiverificaRemarksSeAperto,
