@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         YOS TOOL
+// @name         Yos Tool Scarico
 // @namespace    http://tampermonkey.net/
-// @version      3.43
-// @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Cambio Cutoff manuale legato a cassa + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
+// @version      3.44
+// @description  Orologio scadenze Scarico + Traduttore + Gestione Cutoff (solo Scarico) + Cambio Cutoff manuale legato a cassa + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale Scarico (sezione Carico riservata ai moduli di Yos Tool Carico) + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
 // @match        https://forms.cloud.microsoft/*
@@ -2088,45 +2088,6 @@
         if (!colore) return false;
         return coloreIndicaPronta(colore);
     }
-    function leggiOutboundInScadenza() {
-        const righe = document.querySelectorAll(".scheduled-root.outbound-task, .scheduled-root.highlight-task, .scheduled-root.highlight-undeparted-unit");
-        const risultati = [];
-        const ora = new Date;
-        const finestra = finestraTurnoCorrente(ora);
-        righe.forEach(riga => {
-            const doorEl = riga.querySelector(".outbound-door-number span");
-            const dataEl = riga.querySelector(".outbound-dates-position-change");
-            const destEl = riga.querySelector(".outbound-current-destination");
-            if (!doorEl || !dataEl) return;
-            const door = doorEl.textContent.trim();
-            const testo = dataEl.textContent.trim();
-            if (!testo || testo.toUpperCase().includes("N/A") || door === "-" || !door || categoriaBaia(door) === "Scarico") return;
-            if (rigaSegnalataPronta(riga)) return;
-            const statoBordo = statoBordoBaiaScarico(door);
-            if (statoBordo === "pronta" || statoBordo === "non_attiva") return;
-            const match = testo.match(/(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
-            if (!match) return;
-            const giorno = parseInt(match[1], 10), mese = parseInt(match[2], 10), ore = parseInt(match[3], 10), minuti = parseInt(match[4], 10);
-            const partenza = new Date(ora.getFullYear(), mese - 1, giorno, ore, minuti);
-            const pronto = new Date(partenza.getTime() - 20 * 6e4);
-            if (pronto.getTime() < finestra.inizio.getTime() || pronto.getTime() > finestra.fine.getTime()) return;
-            const diffMinuti = (pronto.getTime() - ora.getTime()) / 6e4;
-            risultati.push({
-                door: door,
-                destinazione: destEl ? destEl.textContent.trim() : "",
-                diffMinuti: diffMinuti,
-                categoria: categoriaBaia(door)
-            });
-        });
-        risultati.sort((a, b) => a.diffMinuti - b.diffMinuti);
-        const visti = new Set;
-        return risultati.filter(r => {
-            const chiave = r.door + "|" + r.destinazione;
-            if (visti.has(chiave)) return false;
-            visti.add(chiave);
-            return true;
-        });
-    }
     const DOOR_NUM_SELECTOR_SCARICO = ".door_number, .west_door_number, .east_door_number, .reverse_door_number";
     let _cacheNodiBaieScarico = null;
     let _cacheNodiBaieScaricoTs = 0;
@@ -4191,33 +4152,6 @@
         html += "<div class=\"tnt-lato-toggle-row\" style=\"display:flex;gap:8px;margin:10px 6px 4px;\"><button type=\"button\" class=\"tnt-lato-btn\" data-lato=\"100\" style=\"flex:1;padding:8px;border-radius:6px;border:none;font-weight:700;font-size:12px;cursor:pointer;background:" + (latiChiusiScarico["100"] ? "#5c1717;color:#FFD5D5;" : "#043d33;color:#BFF3DF;") + "\">100 " + (latiChiusiScarico["100"] ? "chiusa" : "aperta") + "</button><button type=\"button\" class=\"tnt-lato-btn\" data-lato=\"200\" style=\"flex:1;padding:8px;border-radius:6px;border:none;font-weight:700;font-size:12px;cursor:pointer;background:" + (latiChiusiScarico["200"] ? "#5c1717;color:#FFD5D5;" : "#043d33;color:#BFF3DF;") + "\">200 " + (latiChiusiScarico["200"] ? "chiusa" : "aperta") + "</button></div>";
         panelBody.innerHTML = html;
     }
-    function aggiornaPannelloOutbound() {
-        const body = document.getElementById("tnt-orologio-panel-body");
-        const panel = document.getElementById("tnt-orologio-panel");
-        if (!body || !panel || panel.style.display === "none") return;
-        const risultati = leggiOutboundInScadenza();
-        const ordineCategorie = [ "Carico", "Parcheggio", "Freight" ];
-        const gruppi = {
-            Carico: [],
-            Parcheggio: [],
-            Freight: []
-        };
-        risultati.forEach(r => {
-            if (gruppi[r.categoria]) gruppi[r.categoria].push(r);
-        });
-        let html = "";
-        ordineCategorie.forEach(cat => {
-            const lista = gruppi[cat];
-            if (!lista || lista.length === 0) return;
-            html += '<div class="tnt-group-label">' + cat + " (" + lista.length + ")</div>";
-            html += lista.map(r => {
-                const minutiTesto = r.diffMinuti >= 0 ? Math.round(r.diffMinuti) + " min" : "In ritardo";
-                const classeCard = r.diffMinuti <= 30 ? "tnt-card-rosso" : "tnt-card-ambra";
-                return "<div class=\"tnt-card " + classeCard + "\"><div class=\"tnt-card-row\"><span class=\"tnt-card-title\">" + r.door + (r.destinazione ? " · " + escapeHtml(r.destinazione) : "") + "</span><span class=\"tnt-badge\">" + minutiTesto + "</span></div></div>";
-            }).join("");
-        });
-        body.innerHTML = html || '<div class="tnt-empty">Nessuna baia in scadenza</div>';
-    }
     function accodaRiverificaRemarksSeAperto() {
         const panel = document.getElementById("tnt-orologio-scarico-panel");
         if (!pannelloAperto(panel)) return;
@@ -4313,7 +4247,7 @@
     function pannelloAperto(panel) {
         return !!panel && panel.style.display !== "none" && panel.style.display !== "";
     }
-    const ORDINE_GRUPPO_CARICO_SCARICO = [ "tnt-orologio-panel", "tnt-orologio-scarico-panel" ];
+    const ORDINE_GRUPPO_CARICO_SCARICO = [ "tnt-orologio-scarico-panel" ];
     function posizionaPannelliGruppo(ordineIds, tentativi) {
         const menu = document.querySelector(".cc-hub-menu-panel");
         if (!menu) {
@@ -4372,7 +4306,7 @@
     function initIcone() {
         const menu = document.querySelector(".cc-hub-menu-panel");
         if (!menu) return;
-        [ "cc-menu-label-scarico-divider", "cc-menu-label-scarico", "tnt-orologio-scarico-btn", "tnt-btn-scarica-report", "tnt-btn-statistiche", "tnt-btn-parcel-tempistica", "cc-menu-label-carico-divider", "cc-menu-label-carico", "tnt-orologio-btn" ].forEach(id => riaggangiaSeOrfano(id, menu));
+        [ "cc-menu-label-scarico-divider", "cc-menu-label-scarico", "tnt-orologio-scarico-btn", "tnt-btn-scarica-report", "tnt-btn-statistiche", "tnt-btn-parcel-tempistica", "cc-menu-label-carico-divider", "cc-menu-label-carico" ].forEach(id => riaggangiaSeOrfano(id, menu));
         if (!document.getElementById("cc-menu-label-scarico")) {
             const sezScarico = creaEtichettaSezioneMenu("cc-menu-label-scarico", "Scarico", COLORE_SEZIONE_SCARICO);
             menu.appendChild(sezScarico.divider);
@@ -4418,15 +4352,6 @@
             const sezCarico = creaEtichettaSezioneMenu("cc-menu-label-carico", "Carico", COLORE_SEZIONE_CARICO);
             menu.appendChild(sezCarico.divider);
             menu.appendChild(sezCarico.label);
-        }
-        let panelOrologio = document.getElementById("tnt-orologio-panel");
-        if (!document.getElementById("tnt-orologio-btn")) {
-            const disegnoOrologio = '<circle cx="23" cy="23" r="13" fill="none" stroke="#ffffff" stroke-width="2"/><line x1="23" y1="23" x2="23" y2="14" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/><line x1="23" y1="23" x2="29" y2="27" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>';
-            const btn = creaIconaMenu("tnt-orologio-btn", "#000000", disegnoOrologio);
-            btn.title = "Unit Ready in scadenza (Outbound)";
-            menu.appendChild(btn);
-            panelOrologio = creaPannello("tnt-orologio-panel", "Carico - unit ready in scadenza", "#ffffff");
-            collegaClick(btn, panelOrologio, aggiornaPannelloOutbound, ORDINE_GRUPPO_CARICO_SCARICO);
         }
     }
     document.addEventListener("click", e => {
@@ -4518,9 +4443,6 @@
             try {
                 processaTripDetails();
             } catch (e) { registraErroreSilenzioso(e); }
-            try {
-                aggiornaPannelloOutbound();
-            } catch (e) { registraErroreSilenzioso(e); }
         }
         function eNodoInterno(n) {
             if (!n || n.nodeType !== 1) return false;
@@ -4556,9 +4478,6 @@
     }
     function avviaSchedulerPrincipale() {
         const compiti = [ {
-            fn: aggiornaPannelloOutbound,
-            ms: 15e3
-        }, {
             fn: aggiornaPannelloScaricoSeAperto,
             ms: 15e3
         }, {
