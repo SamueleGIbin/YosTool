@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YOS TOOL
 // @namespace    http://tampermonkey.net/
-// @version      3.42
+// @version      3.43
 // @description  Orologi scadenze + Traduttore + Gestione Cutoff (solo Scarico) + Cambio Cutoff manuale legato a cassa + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale diviso Scarico/Carico + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -566,9 +566,27 @@
         }
         return voceOverride;
     }
-    async function impostaCutoffManuale(doorNumber, nomeCategoria) {
+    async function impostaCutoffManuale(doorNumber, nomeCategoria, fallbackArrivo) {
         if (!doorNumber || !nomeCategoria) return;
-        const voceArrivo = caricaArriviBaia()[doorNumber];
+        let voceArrivo = caricaArriviBaia()[doorNumber];
+        if ((!voceArrivo || !voceArrivo.unitId) && fallbackArrivo) {
+            const testoRif = fallbackArrivo.testoActualArrivo && !fallbackArrivo.testoActualArrivo.toUpperCase().includes("N/A") ? fallbackArrivo.testoActualArrivo : fallbackArrivo.testoArrivo;
+            if (testoRif && !testoRif.toUpperCase().includes("N/A")) {
+                const dataRif = parseDataOraSlash(testoRif);
+                if (dataRif) {
+                    const orarioIso = dataRif.toISOString();
+                    const idFallback = "TRIP_" + (fallbackArrivo.tripId || (fallbackArrivo.codiceOrigine || "N") + "_" + orarioIso);
+                    const arriviCorrenti = caricaArriviBaia();
+                    arriviCorrenti[doorNumber] = {
+                        unitId: idFallback,
+                        orario: orarioIso,
+                        action: "TRIP_DETAILS_FALLBACK"
+                    };
+                    salvaArriviBaia(arriviCorrenti);
+                    voceArrivo = arriviCorrenti[doorNumber];
+                }
+            }
+        }
         if (!voceArrivo || !voceArrivo.unitId) return;
         const voce = {
             unitId: String(voceArrivo.unitId),
@@ -579,10 +597,10 @@
         cacheCutoffPerBaia.delete(doorNumber);
         unitVerificatiCutoff.delete(String(voceArrivo.unitId));
         salvaCutoffManualeSuStorage();
-        aggiornaPannelloScaricoSeAperto();
         try {
             processaTripDetails();
         } catch (e) { registraErroreSilenzioso(e); }
+        aggiornaPannelloScaricoSeAperto();
         try {
             const token = await otteniIdTokenValido();
             const url = FIREBASE_SYNC.BASE_URL + "/cutoffManuale/" + doorNumber + ".json?auth=" + token;
@@ -1996,7 +2014,12 @@
                     }
                 }
                 if (baiaSelezionata && codiceOrigine && !eBaiaCarico) registraArrivoDaTripDetailsSeMancante(baiaSelezionata, codiceOrigine, tripId, testoActualArrivo, risultato);
-                aggiornaRigaArrivoECountdown(contenitore, risultato, eBaiaCarico);
+                aggiornaRigaArrivoECountdown(contenitore, risultato, eBaiaCarico, {
+                    codiceOrigine: codiceOrigine,
+                    tripId: tripId,
+                    testoArrivo: testoArrivo,
+                    testoActualArrivo: testoActualArrivo
+                });
                 if (risultato && baiaSelezionata && !eBaiaCarico) impostaCacheCutoffBaia(baiaSelezionata, risultato, codiceOrigine);
                 if (!origineEl || !arrivoEl) return;
                 const risultatoChiave = risultato ? (risultato.manuale ? "M" : "A") + ":" + risultato.cat.nome + ":" + risultato.cutoffDate.getTime() : "N";
@@ -3584,7 +3607,7 @@
         valSpan.textContent = valoreCountdown;
         valSpan.style.color = colore;
     }
-    function aggiornaRigaArrivoECountdown(ambito, risultato, eBaiaCarico) {
+    function aggiornaRigaArrivoECountdown(ambito, risultato, eBaiaCarico, infoOrigine) {
         const rigaRemarks = trovaRigaPerChiavi(ambito, [ "Arrival Remarks", "YOS Remarks" ]);
         if (!rigaRemarks) {
             const vecchiaAssente = ambito.querySelector(".tnt-custom-info-row");
@@ -3608,6 +3631,7 @@
             return;
         }
         if (rigaEsistente) rigaEsistente.remove();
+        const baiaContestoRiga = baiaSelezionata;
         const rigaNuova = document.createElement("div");
         rigaNuova.className = "row door-info__movmt-section-row tnt-custom-info-row";
         rigaNuova.style.marginTop = "10px";
@@ -3801,14 +3825,14 @@
         const btnBuf = document.createElement("button");
         btnBuf.style.cssText = "color:#fff;border:none;border-radius:5px;padding:3px 6px;font-size:10px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;background:#8e44ad;";
         function aggiornaTestoBtnBuf() {
-            const attivo = baiaSelezionata && bufferManualeBaie.has(baiaSelezionata);
+            const attivo = baiaContestoRiga && bufferManualeBaie.has(baiaContestoRiga);
             btnBuf.textContent = attivo ? "✓ Buffer" : "Segnala buffer";
         }
         aggiornaTestoBtnBuf();
         btnBuf.addEventListener("click", async e => {
             e.stopPropagation();
-            if (!baiaSelezionata) return;
-            await toggleBufferManuale(baiaSelezionata);
+            if (!baiaContestoRiga) return;
+            await toggleBufferManuale(baiaContestoRiga);
             aggiornaTestoBtnBuf();
         });
         colBtnBuf.appendChild(btnBuf);
@@ -3843,14 +3867,14 @@
             const nomeScelto = selectCutoff.value;
             selectCutoff.style.display = "none";
             selectCutoff.value = "";
-            if (!nomeScelto || !baiaSelezionata) return;
-            await impostaCutoffManuale(baiaSelezionata, nomeScelto);
+            if (!nomeScelto || !baiaContestoRiga) return;
+            await impostaCutoffManuale(baiaContestoRiga, nomeScelto, infoOrigine);
         });
         colBtnCutoff.appendChild(btnCutoff);
         colBtnCutoff.appendChild(selectCutoff);
         rigaBadLoading.appendChild(colBtnCutoff);
         rigaNuova.insertAdjacentElement("afterend", rigaBadLoading);
-        const overrideAttivoUIFinale = baiaSelezionata && leggiCutoffManualeValido(baiaSelezionata);
+        const overrideAttivoUIFinale = baiaContestoRiga && leggiCutoffManualeValido(baiaContestoRiga);
         if (overrideAttivoUIFinale) {
             const rigaRipristina = document.createElement("div");
             rigaRipristina.className = "row door-info__movmt-section-row tnt-cutoff-manuale-row";
@@ -3860,8 +3884,8 @@
             btnRipristina.style.cssText = "background:#3a3a3c;color:#FFCC66;border:1px solid #e67e22;border-radius:5px;padding:3px 6px;font-size:10px;font-weight:700;font-family:Roboto,sans-serif;cursor:pointer;width:100%;";
             btnRipristina.addEventListener("click", async e => {
                 e.stopPropagation();
-                if (!baiaSelezionata) return;
-                await ripristinaCutoff(baiaSelezionata);
+                if (!baiaContestoRiga) return;
+                await ripristinaCutoff(baiaContestoRiga);
             });
             rigaRipristina.appendChild(btnRipristina);
             rigaBadLoading.insertAdjacentElement("afterend", rigaRipristina);
