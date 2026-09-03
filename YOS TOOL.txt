@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Yos Tool Scarico
 // @namespace    http://tampermonkey.net/
-// @version      3.44
+// @version      3.45
 // @description  Orologio scadenze Scarico + Traduttore + Gestione Cutoff (solo Scarico) + Cambio Cutoff manuale legato a cassa + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale Scarico (sezione Carico riservata ai moduli di Yos Tool Carico) + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -2209,7 +2209,14 @@
         const idFallback = "TRIP_" + (tripId || codiceOrigine + "_" + orarioFallback);
         const arrivi = caricaArriviBaia();
         const esistente = arrivi[doorNumber];
-        if (esistente && String(esistente.unitId).indexOf("TRIP_") !== 0) return;
+        if (esistente && String(esistente.unitId).indexOf("TRIP_") !== 0) {
+            const movEsistente = cacheMovimentiPerUnit.get(String(esistente.unitId));
+            const disallineato = movEsistente && codiceOrigine && movEsistente.origin && movEsistente.origin !== codiceOrigine;
+            if (!disallineato) return;
+            cacheCutoffPerBaia.delete(doorNumber);
+            cutoffManualeBaie.delete(doorNumber);
+            salvaCutoffManualeSuStorage();
+        }
         if (esistente && esistente.unitId === idFallback) return;
         arrivi[doorNumber] = {
             unitId: idFallback,
