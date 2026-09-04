@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Yos Tool Scarico
 // @namespace    http://tampermonkey.net/
-// @version      3.45
+// @version      3.49
 // @description  Orologio scadenze Scarico + Traduttore + Gestione Cutoff (solo Scarico) + Cambio Cutoff manuale legato a cassa + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale Scarico (sezione Carico riservata ai moduli di Yos Tool Carico) + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -656,6 +656,9 @@
             });
             [ ...cutoffManualeBaie.keys() ].forEach(k => {
                 if (!remoto[k]) {
+                    const voceLocale = cutoffManualeBaie.get(k);
+                    const tsLocale = voceLocale && voceLocale.ts ? new Date(voceLocale.ts).getTime() : 0;
+                    if ((Date.now() - tsLocale) < 3e4) return;
                     cutoffManualeBaie.delete(k);
                     cacheCutoffPerBaia.delete(k);
                     modificato = true;
@@ -719,6 +722,9 @@
             });
             [ ...bufferManualeBaie.keys() ].forEach(k => {
                 if (!remoto[k]) {
+                    const voceLocale = bufferManualeBaie.get(k);
+                    const tsLocale = voceLocale && voceLocale.ts ? new Date(voceLocale.ts).getTime() : 0;
+                    if ((Date.now() - tsLocale) < 3e4) return;
                     bufferManualeBaie.delete(k);
                     aggiornaBadgeBufferSuDOM(k, false);
                     aggiornaFlagBufferSessioneInCorso(k);
@@ -1103,10 +1109,10 @@
                 }
                 return;
             }
-            const unitId = unit.unitId;
+            const unitId = String(unit.unitId);
             if (categoriaBaia(doorNumber) === "Scarico") unitGiaScaricati.set(String(unitId), Date.now());
             const esistente = arrivi[doorNumber];
-            const cambiaUnit = !esistente || esistente.unitId !== unitId;
+            const cambiaUnit = !esistente || String(esistente.unitId) !== unitId;
             if (cambiaUnit) {
                 const sessionePrecedente = sessioniScaricoInCorso.get(doorNumber);
                 if (sessionePrecedente && sessionePrecedente.unitId !== String(unitId)) chiudiSessioneScarico(doorNumber, (new Date).toISOString());
@@ -1117,7 +1123,9 @@
             const transitaAdAzioneTracciata = prioritaNuova > 0 && prioritaNuova > prioritaPrecedente;
             if (cambiaUnit || transitaAdAzioneTracciata) {
                 let orario;
-                if (unit.currentAction === "START_UNLOADING" && (unit.updatedDateTimestamp || unit.updatedDate)) {
+                if (!cambiaUnit && esistente && esistente.orario) {
+                    orario = esistente.orario;
+                } else if (unit.currentAction === "START_UNLOADING" && (unit.updatedDateTimestamp || unit.updatedDate)) {
                     orario = unit.updatedDateTimestamp || unit.updatedDate;
                 } else if (unit.currentAction === "LOCATION_ASSIGNED" && (unit.updatedDateTimestamp || unit.updatedDate)) {
                     orario = unit.updatedDateTimestamp || unit.updatedDate;
@@ -1166,9 +1174,9 @@
                 }
                 return;
             }
-            const unitId = unit.unitId;
+            const unitId = String(unit.unitId);
             const esistente = arrivi[doorNumber];
-            const cambiaUnit = !esistente || esistente.unitId !== unitId;
+            const cambiaUnit = !esistente || String(esistente.unitId) !== unitId;
             if (cambiaUnit) {
                 const orario = unit.updatedDateTimestamp || unit.updatedDate || (new Date).toISOString();
                 arrivi[doorNumber] = {
@@ -2053,14 +2061,20 @@
                     sezione.appendChild(avvisoCodice);
                 }
                 if (risultato && risultato.ritardo && risultato.cutoffOriginale && categoriaBaia(baiaSelezionata) === "Scarico") {
-                    const hhO = String(risultato.cutoffOriginale.getHours()).padStart(2, "0");
-                    const mmO = String(risultato.cutoffOriginale.getMinutes()).padStart(2, "0");
-                    const hhN = String(risultato.cutoffDate.getHours()).padStart(2, "0");
-                    const mmN = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
-                    const avviso = document.createElement("div");
-                    avviso.className = "row door-info__movmt-section-row tnt-avviso-ritardo";
-                    avviso.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Cutoff spostato per arrivo in ritardo: <strong>' + hhO + ":" + mmO + "</strong> &rarr; <strong>" + hhN + ":" + mmN + "</strong> (meno di " + (risultato.margineMinimo || MARGINE_MINIMO_INTERNAZIONALE_MINUTI) + " minuti di lavorazione disponibili)</div></div>";
-                    sezione.appendChild(avviso);
+                    const minutiAllaCutoffOra = (risultato.cutoffDate.getTime() - (new Date).getTime()) / 6e4;
+                    const sogliaAvviso = risultato.margineMinimo || MARGINE_MINIMO_INTERNAZIONALE_MINUTI;
+                    if (minutiAllaCutoffOra <= sogliaAvviso) {
+                        const ddO = String(risultato.cutoffOriginale.getDate()).padStart(2, "0") + "/" + String(risultato.cutoffOriginale.getMonth() + 1).padStart(2, "0");
+                        const hhO = String(risultato.cutoffOriginale.getHours()).padStart(2, "0");
+                        const mmO = String(risultato.cutoffOriginale.getMinutes()).padStart(2, "0");
+                        const ddN = String(risultato.cutoffDate.getDate()).padStart(2, "0") + "/" + String(risultato.cutoffDate.getMonth() + 1).padStart(2, "0");
+                        const hhN = String(risultato.cutoffDate.getHours()).padStart(2, "0");
+                        const mmN = String(risultato.cutoffDate.getMinutes()).padStart(2, "0");
+                        const avviso = document.createElement("div");
+                        avviso.className = "row door-info__movmt-section-row tnt-avviso-ritardo";
+                        avviso.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Cutoff spostato per arrivo in ritardo: <strong>' + ddO + " " + hhO + ":" + mmO + "</strong> &rarr; <strong>" + ddN + " " + hhN + ":" + mmN + "</strong> (meno di " + sogliaAvviso + " minuti di lavorazione disponibili)</div></div>";
+                        sezione.appendChild(avviso);
+                    }
                 }
             } catch (e) { registraErroreSilenzioso(e); }
         });
@@ -4452,9 +4466,18 @@
             } catch (e) { registraErroreSilenzioso(e); }
         }
         function eNodoInterno(n) {
-            if (!n || n.nodeType !== 1) return false;
-            if (n.id && n.id.indexOf("tnt-") === 0) return true;
-            return !!(n.closest && n.closest('[id^="tnt-"], .tnt-panel, .cc-menu-button'));
+            let el = n;
+            while (el && el.nodeType === 1) {
+                if (el.id && el.id.indexOf("tnt-") === 0) return true;
+                if (el.classList) {
+                    for (let i = 0; i < el.classList.length; i++) {
+                        const c = el.classList[i];
+                        if (c.indexOf("tnt-") === 0 || c.indexOf("cc-menu-") === 0) return true;
+                    }
+                }
+                el = el.parentElement;
+            }
+            return false;
         }
         const observer = new MutationObserver(mutations => {
             for (const m of mutations) {
