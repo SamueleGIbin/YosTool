@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Yos Tool Scarico
 // @namespace    http://tampermonkey.net/
-// @version      3.50
+// @version      3.53
 // @description  Orologio scadenze Scarico + Traduttore + Gestione Cutoff (solo Scarico) + Cambio Cutoff manuale legato a cassa + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale Scarico (sezione Carico riservata ai moduli di Yos Tool Carico) + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -791,8 +791,15 @@
         if (!doorNumber || !risultato) return;
         const voce = caricaArriviBaia()[doorNumber];
         if (!voce || !voce.unitId) return;
-        const mov = cacheMovimentiPerUnit.get(String(voce.unitId));
-        if (mov && mov.origin && codiceOrigine && mov.origin !== codiceOrigine) return;
+        let mov = cacheMovimentiPerUnit.get(String(voce.unitId));
+        if (mov && codiceOrigine && mov.origin && mov.origin !== codiceOrigine) {
+            mov = Object.assign({}, mov, {
+                origin: codiceOrigine,
+                vistoIl: Date.now()
+            });
+            cacheMovimentiPerUnit.set(String(voce.unitId), mov);
+            salvaCacheMovimentiSuStorage();
+        }
         const arrivoRif = mov ? mov.actualArrival || mov.scheduleArrival || mov.estimatedArrival || "" : "";
         cacheCutoffPerBaia.set(doorNumber, {
             unitId: String(voce.unitId),
@@ -1163,8 +1170,9 @@
         const arrivi = caricaArriviBaia();
         let modificato = false;
         porte.forEach(porta => {
-            const doorNumber = porta && porta.parkingName ? String(porta.parkingName).trim() : null;
+            let doorNumber = porta && porta.parkingName ? String(porta.parkingName).trim() : null;
             if (!doorNumber) return;
+            if (/^\d+$/.test(doorNumber)) doorNumber = "P" + doorNumber;
             const unit = porta.unitDTO;
             if (!unit || !unit.unitId) {
                 if (arrivi[doorNumber]) {
@@ -2198,6 +2206,90 @@
         return [ ...risultati ].sort(confrontaBaie);
     }
     const STORAGE_KEY_ARRIVI = "tnt_arrivi_baia_scarico_v1";
+    const STORAGE_KEY_AUTOREFRESH = "tnt_autorefresh_min_v1";
+    const STORAGE_KEY_PROSSIMO_AUTOREFRESH = "tnt_autorefresh_prossimo_v1";
+    const STORAGE_KEY_ULTIMO_TS_AUTOREFRESH = "tnt_autorefresh_ultimo_ts_v1";
+    async function scriviImpostazioneAutoRefreshSuFirebase(valore) {
+        if (!FIREBASE_SYNC.ATTIVO) return;
+        const ts = Date.now();
+        try {
+            localStorage.setItem(STORAGE_KEY_ULTIMO_TS_AUTOREFRESH, String(ts));
+        } catch (e) { registraErroreSilenzioso(e); }
+        try {
+            const token = await otteniIdTokenValido();
+            const url = FIREBASE_SYNC.BASE_URL + "/impostazioniCondivise/autoRefresh.json?auth=" + token;
+            await fetch(url, {
+                method: "PUT",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    intervallo: valore,
+                    ts: ts
+                })
+            });
+        } catch (e) { registraErroreSilenzioso(e); }
+    }
+    async function sincronizzaImpostazioneAutoRefresh() {
+        if (!FIREBASE_SYNC.ATTIVO) return;
+        try {
+            const token = await otteniIdTokenValido();
+            const url = FIREBASE_SYNC.BASE_URL + "/impostazioniCondivise/autoRefresh.json?auth=" + token;
+            const res = await fetch(url, {
+                cache: "no-store"
+            });
+            if (!res.ok) return;
+            const remoto = await res.json();
+            if (!remoto || typeof remoto !== "object" || !remoto.intervallo) return;
+            let ultimoTsApplicato = null;
+            try {
+                ultimoTsApplicato = parseInt(localStorage.getItem(STORAGE_KEY_ULTIMO_TS_AUTOREFRESH), 10);
+            } catch (e) { registraErroreSilenzioso(e); }
+            if (ultimoTsApplicato && remoto.ts && remoto.ts <= ultimoTsApplicato) return;
+            try {
+                localStorage.setItem(STORAGE_KEY_ULTIMO_TS_AUTOREFRESH, String(remoto.ts || Date.now()));
+            } catch (e) { registraErroreSilenzioso(e); }
+            if (leggiIntervalloAutoRefresh() === remoto.intervallo) return;
+            salvaIntervalloAutoRefresh(remoto.intervallo);
+            location.reload();
+        } catch (e) { registraErroreSilenzioso(e); }
+    }
+    function leggiIntervalloAutoRefresh() {
+        try {
+            const v = localStorage.getItem(STORAGE_KEY_AUTOREFRESH);
+            return v === "5" || v === "10" ? v : "off";
+        } catch (e) {
+            return "off";
+        }
+    }
+    function salvaIntervalloAutoRefresh(v) {
+        try {
+            localStorage.setItem(STORAGE_KEY_AUTOREFRESH, v);
+        } catch (e) { registraErroreSilenzioso(e); }
+    }
+    function pianificaProssimoAutoRefresh() {
+        const intervallo = leggiIntervalloAutoRefresh();
+        try {
+            if (intervallo === "off") {
+                localStorage.removeItem(STORAGE_KEY_PROSSIMO_AUTOREFRESH);
+                return;
+            }
+            localStorage.setItem(STORAGE_KEY_PROSSIMO_AUTOREFRESH, String(Date.now() + parseInt(intervallo, 10) * 60 * 1e3));
+        } catch (e) { registraErroreSilenzioso(e); }
+    }
+    function controllaAutoRefreshPagina() {
+        const intervallo = leggiIntervalloAutoRefresh();
+        if (intervallo === "off") return;
+        let prossimo = null;
+        try {
+            prossimo = parseInt(localStorage.getItem(STORAGE_KEY_PROSSIMO_AUTOREFRESH), 10);
+        } catch (e) { registraErroreSilenzioso(e); }
+        if (!prossimo || isNaN(prossimo)) {
+            pianificaProssimoAutoRefresh();
+            return;
+        }
+        if (Date.now() >= prossimo) location.reload();
+    }
     const STORAGE_KEY_STORICO = "tnt_storico_report_scarico_v1";
     let baiaSelezionata = null;
     let ultimoAggiornamentoScaricoTs = null;
@@ -2757,9 +2849,20 @@
         const wrapper = document.createElement("div");
         wrapper.id = "tnt-top-badges";
         wrapper.style.cssText = "position:fixed;top:6px;left:50%;transform:translateX(-50%);z-index:999998;display:flex;align-items:center;gap:8px;font-family:Roboto,sans-serif;";
-        wrapper.innerHTML = "<div id=\"tnt-badge-colli\" title=\"Productivity - colli lavorati\" style=\"display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);cursor:pointer;\"><span style=\"color:#8B5CF6;\">&#9679;</span><span>Productivity</span></div><div id=\"tnt-badge-sync\" style=\"display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);\"><span id=\"tnt-badge-dot\" style=\"width:8px;height:8px;border-radius:50%;background:#777;flex-shrink:0;\"></span><span id=\"tnt-badge-testo\">Sync...</span></div>";
+        wrapper.innerHTML = "<div id=\"tnt-badge-colli\" title=\"Productivity - colli lavorati\" style=\"display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);cursor:pointer;\"><span style=\"color:#8B5CF6;\">&#9679;</span><span>Productivity</span></div><div id=\"tnt-badge-sync\" style=\"display:flex;align-items:center;gap:6px;background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 10px;font-size:11px;color:#f2f2f2;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4);\"><span id=\"tnt-badge-dot\" style=\"width:8px;height:8px;border-radius:50%;background:#777;flex-shrink:0;\"></span><span id=\"tnt-badge-testo\">Sync...</span></div><select id=\"tnt-select-autorefresh\" title=\"Refresh automatico pagina\" style=\"background:#1c1c1e;border:1px solid #333;border-radius:12px;padding:4px 8px;font-size:11px;color:#f2f2f2;box-shadow:0 2px 8px rgba(0,0,0,0.4);cursor:pointer;\"><option value=\"off\">Refresh: Off</option><option value=\"5\">Refresh: 5 min</option><option value=\"10\">Refresh: 10 min</option></select>";
         document.body.appendChild(wrapper);
         const btnColli = document.getElementById("tnt-badge-colli");
+        const selectAutoRefresh = document.getElementById("tnt-select-autorefresh");
+        selectAutoRefresh.value = leggiIntervalloAutoRefresh();
+        selectAutoRefresh.addEventListener("click", e => e.stopPropagation());
+        selectAutoRefresh.addEventListener("change", async e => {
+            e.stopPropagation();
+            const valore = selectAutoRefresh.value;
+            salvaIntervalloAutoRefresh(valore);
+            pianificaProssimoAutoRefresh();
+            await scriviImpostazioneAutoRefreshSuFirebase(valore);
+            location.reload();
+        });
         const panelColli = creaPannello("tnt-colli-panel", "Productivity - Colli turno", "#8B5CF6");
         panelColli.style.width = "280px";
         panelColli.style.border = "1px solid #333";
@@ -4013,13 +4116,15 @@
             if (statoBordo === "pronta" || statoBordo === "non_attiva" || statoBordo === "shunter") continue;
             const voceBaia = arriviCorrenti[baia.doorNumber];
             if (categoriaBaia(baia.doorNumber) === "Parcheggio" && voceBaia && unitGiaScaricati.has(String(voceBaia.unitId))) continue;
-            let infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
-            if (!infoCutoff) {
-                const cutoffCachato = leggiCacheCutoffBaia(baia.doorNumber);
-                if (cutoffCachato) { infoCutoff = {
+            let infoCutoff = null;
+            const cutoffCachato = leggiCacheCutoffBaia(baia.doorNumber);
+            if (cutoffCachato) {
+                infoCutoff = {
                     cutoff: cutoffCachato,
                     codice: null
-                }; }
+                };
+            } else {
+                infoCutoff = calcolaCutoffDaCacheMovimenti(baia.doorNumber);
             }
             if (!infoCutoff && baiaSelezionata === baia.doorNumber) {
                 assicuraTabInbound();
@@ -4419,6 +4524,9 @@
     function avviaTool() {
         impostaBadgeInAttesa();
         try {
+            pianificaProssimoAutoRefresh();
+        } catch (e) { registraErroreSilenzioso(e); }
+        try {
             caricaCacheMovimentiDaStorage();
         } catch (e) { registraErroreSilenzioso(e); }
         try {
@@ -4504,10 +4612,14 @@
         avviaSchedulerPrincipale();
         sincronizzaBufferManuale();
         sincronizzaCutoffManuale();
+        sincronizzaImpostazioneAutoRefresh();
         pianificaSincronizzazione(3e3);
     }
     function avviaSchedulerPrincipale() {
         const compiti = [ {
+            fn: controllaAutoRefreshPagina,
+            ms: 3e4
+        }, {
             fn: aggiornaPannelloScaricoSeAperto,
             ms: 15e3
         }, {
@@ -4545,6 +4657,9 @@
             ms: 2e4
         }, {
             fn: sincronizzaCutoffManuale,
+            ms: 2e4
+        }, {
+            fn: sincronizzaImpostazioneAutoRefresh,
             ms: 2e4
         }, {
             fn: accodaRiverificaRemarksSeAperto,
