@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Yos Tool Scarico
 // @namespace    http://tampermonkey.net/
-// @version      3.53
+// @version      3.55
 // @description  Orologio scadenze Scarico + Traduttore + Gestione Cutoff (solo Scarico) + Cambio Cutoff manuale legato a cassa + Tracciamento Arrivi Baia + Statistiche di turno per lato e per baia + Trend storico + Sync Firebase tra postazioni + Esportazione Report Excel completo + Tempistica Parcel Scarico + Menu laterale Scarico (sezione Carico riservata ai moduli di Yos Tool Carico) + Productivity: colli automatici da Splunk con pannello impostazioni + Bad Loading auto-fill
 // @match        https://yos.apps.tnt.com/hub-overview*
 // @match        https://ot-splunk1.corp.ds.fedex.com/*
@@ -1208,6 +1208,7 @@
     const unitVerificatiCutoff = new Set;
     const codaVerificaBaie = [];
     let codaInLavorazione = false;
+    let verificaBaiaInCorso = false;
     function elementoIndicaShunterReale(wrapper) {
         if (!wrapper) return false;
         const el = wrapper.querySelector('[class*="shunter"]');
@@ -1424,8 +1425,15 @@
                 codaInLavorazione = false;
                 return;
             }
+            const contenitoreAperto = document.querySelector(".door-info__movmt-no-left-padding");
+            if (contenitoreAperto && contenitoreAperto.offsetParent !== null && baiaSelezionata !== voce.doorNumber) {
+                codaVerificaBaie.push(voce);
+                codaInLavorazione = false;
+                return;
+            }
             const baiaPrecedente = baiaSelezionata;
             const tabOutboundPrecedente = [ ...document.querySelectorAll(".door-info__header--nav-text") ].some(el => el.textContent.trim() === "OUTBOUND" && el.classList.contains("door-info__header--nav-text--selected"));
+            verificaBaiaInCorso = true;
             baiaSelezionata = voce.doorNumber;
             simulaClickReale(wrapper);
             await new Promise(r => setTimeout(r, 900));
@@ -1468,6 +1476,7 @@
                 }
             }
         } catch (e) { registraErroreSilenzioso(e); }
+        verificaBaiaInCorso = false;
         codaInLavorazione = false;
     }
     const codeMap = {
@@ -1946,6 +1955,16 @@
         col.appendChild(val);
         return col;
     }
+    function trovaDoorNumberDaContenitore(contenitore) {
+        const wrapper = contenitore.closest('[id^="unit_"]');
+        if (!wrapper) return null;
+        const numEl = wrapper.querySelector(DOOR_NUM_SELECTOR_SCARICO);
+        if (!numEl) return null;
+        const span = numEl.querySelector("span");
+        if (!span) return null;
+        const testo = span.textContent.trim();
+        return testo || null;
+    }
     function processaTripDetails() {
         const contenitori = document.querySelectorAll(".door-info__movmt-no-left-padding");
         contenitori.forEach(contenitore => {
@@ -1962,17 +1981,18 @@
                     if (vecchiaArrivo) vecchiaArrivo.remove();
                     return;
                 }
-                const eBaiaCarico = baiaSelezionata && categoriaBaia(baiaSelezionata) === "Carico";
-                if (baiaSelezionata) {
+                const baiaCorrente = trovaDoorNumberDaContenitore(contenitore) || baiaSelezionata;
+                const eBaiaCarico = baiaCorrente && categoriaBaia(baiaCorrente) === "Carico";
+                if (baiaCorrente) {
                     const remarksEl = trovaValorePerChiave(sezione, "YOS Remarks") || trovaValorePerChiave(sezione, "Arrival Remarks");
                     const testoRemarks = remarksEl ? remarksEl.dataset && remarksEl.dataset.tntCode ? remarksEl.dataset.tntCode : remarksEl.textContent.trim() : "";
-                    const eraEscluso = remarksEsclusiOrologio(cacheRemarksPerBaia.get(baiaSelezionata));
-                    if (testoRemarks) { cacheRemarksPerBaia.set(baiaSelezionata, {
+                    const eraEscluso = remarksEsclusiOrologio(cacheRemarksPerBaia.get(baiaCorrente));
+                    if (testoRemarks) { cacheRemarksPerBaia.set(baiaCorrente, {
                         testo: testoRemarks,
                         ts: (new Date).toISOString()
-                    }); } else { cacheRemarksPerBaia.delete(baiaSelezionata); }
-                    aggiornaFlagBufferSessioneInCorso(baiaSelezionata);
-                    if (eraEscluso !== remarksEsclusiOrologio(cacheRemarksPerBaia.get(baiaSelezionata))) {
+                    }); } else { cacheRemarksPerBaia.delete(baiaCorrente); }
+                    aggiornaFlagBufferSessioneInCorso(baiaCorrente);
+                    if (eraEscluso !== remarksEsclusiOrologio(cacheRemarksPerBaia.get(baiaCorrente))) {
                         pianificaSincronizzazione(800);
                         aggiornaPannelloScaricoSeAperto();
                     }
@@ -2000,9 +2020,9 @@
                             }
                         }
                         let arrivoPortaReale = null;
-                        if (baiaSelezionata) {
+                        if (baiaCorrente) {
                             const arriviSalvati = caricaArriviBaia();
-                            const voceBaia = arriviSalvati[baiaSelezionata];
+                            const voceBaia = arriviSalvati[baiaCorrente];
                             if (voceBaia && voceBaia.orario) {
                                 const d = new Date(voceBaia.orario);
                                 if (!isNaN(d.getTime())) {
@@ -2014,8 +2034,8 @@
                         if (arrivo && !eBaiaCarico) {
                             risultato = calcolaCutoffPerCodice(codiceOrigine, arrivo, arrivoPortaReale);
                         }
-                        if (arrivo && !eBaiaCarico && baiaSelezionata) {
-                            const overrideValido = leggiCutoffManualeValido(baiaSelezionata);
+                        if (arrivo && !eBaiaCarico && baiaCorrente) {
+                            const overrideValido = leggiCutoffManualeValido(baiaCorrente);
                             if (overrideValido) {
                                 const catForzata = CATEGORIE.find(c => c.nome === overrideValido.categoria);
                                 if (catForzata) {
@@ -2029,14 +2049,15 @@
                         }
                     }
                 }
-                if (baiaSelezionata && codiceOrigine && !eBaiaCarico) registraArrivoDaTripDetailsSeMancante(baiaSelezionata, codiceOrigine, tripId, testoActualArrivo, risultato);
+                if (baiaCorrente && codiceOrigine && !eBaiaCarico) registraArrivoDaTripDetailsSeMancante(baiaCorrente, codiceOrigine, tripId, testoActualArrivo, risultato);
                 aggiornaRigaArrivoECountdown(contenitore, risultato, eBaiaCarico, {
                     codiceOrigine: codiceOrigine,
                     tripId: tripId,
                     testoArrivo: testoArrivo,
-                    testoActualArrivo: testoActualArrivo
+                    testoActualArrivo: testoActualArrivo,
+                    baiaCorrente: baiaCorrente
                 });
-                if (risultato && baiaSelezionata && !eBaiaCarico) impostaCacheCutoffBaia(baiaSelezionata, risultato, codiceOrigine);
+                if (risultato && baiaCorrente && !eBaiaCarico) impostaCacheCutoffBaia(baiaCorrente, risultato, codiceOrigine);
                 if (!origineEl || !arrivoEl) return;
                 const risultatoChiave = risultato ? (risultato.manuale ? "M" : "A") + ":" + risultato.cat.nome + ":" + risultato.cutoffDate.getTime() : "N";
                 const chiave = codiceOrigine + "|" + testoArrivo + "|" + testoActualArrivo + "|" + testoArrivoPorta + "|" + risultatoChiave;
@@ -2068,7 +2089,7 @@
                     avvisoCodice.innerHTML = '<div class="col-12"><div class="tnt-banner-ritardo">Codice origine non riconosciuto: <strong>' + escapeHtml(codiceOrigine) + "</strong> — nessun cutoff calcolabile, va censito</div></div>";
                     sezione.appendChild(avvisoCodice);
                 }
-                if (risultato && risultato.ritardo && risultato.cutoffOriginale && categoriaBaia(baiaSelezionata) === "Scarico") {
+                if (risultato && risultato.ritardo && risultato.cutoffOriginale && categoriaBaia(baiaCorrente) === "Scarico") {
                     const minutiAllaCutoffOra = (risultato.cutoffDate.getTime() - (new Date).getTime()) / 6e4;
                     const sogliaAvviso = risultato.margineMinimo || MARGINE_MINIMO_INTERNAZIONALE_MINUTI;
                     if (minutiAllaCutoffOra <= sogliaAvviso) {
@@ -3693,6 +3714,7 @@
         valSpan.style.color = colore;
     }
     function aggiornaRigaArrivoECountdown(ambito, risultato, eBaiaCarico, infoOrigine) {
+        const baiaContestoRiga = (infoOrigine && infoOrigine.baiaCorrente) || baiaSelezionata;
         const rigaRemarks = trovaRigaPerChiavi(ambito, [ "Arrival Remarks", "YOS Remarks" ]);
         if (!rigaRemarks) {
             const vecchiaAssente = ambito.querySelector(".tnt-custom-info-row");
@@ -3700,23 +3722,22 @@
             return;
         }
         let valoreArrivo = "N/A";
-        if (baiaSelezionata) {
+        if (baiaContestoRiga) {
             const arrivi = caricaArriviBaia();
-            const voce = arrivi[baiaSelezionata];
+            const voce = arrivi[baiaContestoRiga];
             if (voce && voce.orario) {
                 const dataArrivo = new Date(voce.orario);
                 valoreArrivo = String(dataArrivo.getHours()).padStart(2, "0") + ":" + String(dataArrivo.getMinutes()).padStart(2, "0");
             }
         }
-        const overrideAttivoUI = baiaSelezionata && leggiCutoffManualeValido(baiaSelezionata);
-        const chiaveContenuto = [ baiaSelezionata || "", eBaiaCarico ? "1" : "0", valoreArrivo, risultato && risultato.manuale ? "1" : "0", overrideAttivoUI ? overrideAttivoUI.categoria : "" ].join("|");
+        const overrideAttivoUI = baiaContestoRiga && leggiCutoffManualeValido(baiaContestoRiga);
+        const chiaveContenuto = [ baiaContestoRiga || "", eBaiaCarico ? "1" : "0", valoreArrivo, risultato && risultato.manuale ? "1" : "0", overrideAttivoUI ? overrideAttivoUI.categoria : "" ].join("|");
         const rigaEsistente = ambito.querySelector(".tnt-custom-info-row");
         if (rigaEsistente && rigaEsistente.getAttribute("data-tnt-info-key") === chiaveContenuto) {
             if (!eBaiaCarico) aggiornaSoloCountdown(rigaEsistente, risultato);
             return;
         }
         if (rigaEsistente) rigaEsistente.remove();
-        const baiaContestoRiga = baiaSelezionata;
         const rigaNuova = document.createElement("div");
         rigaNuova.className = "row door-info__movmt-section-row tnt-custom-info-row";
         rigaNuova.style.marginTop = "10px";
@@ -4570,7 +4591,7 @@
                 posizionaBadgeProduttivita();
             } catch (e) { registraErroreSilenzioso(e); }
             try {
-                processaTripDetails();
+                if (!verificaBaiaInCorso) processaTripDetails();
             } catch (e) { registraErroreSilenzioso(e); }
         }
         function eNodoInterno(n) {
