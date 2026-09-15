@@ -1567,7 +1567,7 @@
         turno: "Primo Shift",
         cutoffOre: 21,
         cutoffMin: 45,
-        codici: [ "AOS1", "ESSENZ", "SATCI", "GAMESTOP", "AT21", "CEMB", "RUBI", "PJLO", "COWA", "HILT", "INCO", "PENT", "LIVA", "RUNN", "PNT1", "TRAS", "COVD" ]
+        codici: [ "AOS1", "ESSENZ", "SATCI", "GAMESTOP", "AT21", "CEMB", "RUBI", "PJLO", "COWA", "HILT", "INCO", "PENT", "LIVA", "RUNN", "PNT1", "TRAS", "COVD", "STAC" ]
     }, {
         nome: "Filiali per Sud",
         turno: "Primo Shift",
