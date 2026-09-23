@@ -322,7 +322,7 @@
             categoria: "IMPORT SECONDA",
             arrivo: "02:30",
             scadenza: "04:00",
-            codici: "MV9-BCN-XWT-SKG-ATH-KCW-LJU"
+            codici: "MV9-BCN-XWT-SKG-ATH-KCW-LJU-C5H"
         }, {
             categoria: "HUB 07 NORD",
             arrivo: "04:30",
@@ -340,7 +340,7 @@
             codici: "LYS-MRS-BA5-NT3"
         } ]
     } ];
-    const TABELLA_DEST_PARCEL = [ [ "AN6", "ANCONA" ], [ "ATH", "ATENE" ], [ "B7Q", "BOLOGNA" ], [ "B8Y", "BERGAMO" ], [ "BA5", "BARI" ], [ "BCN", "BARCELLONA" ], [ "BEA", "BIELLA" ], [ "BO1", "BOLOGNA" ], [ "BO2", "BOLOGNA" ], [ "BRG", "BERGAMO" ], [ "BZQ", "BELGIO" ], [ "CUF", "CUNEO" ], [ "DFT*", "GERMANIA" ], [ "DNG*", "NORIMBERGA" ], [ "ECL", "FRANCIA" ], [ "FC5", "FIRENZE" ], [ "FIA", "FIANO" ], [ "GOA", "GENOVA" ], [ "HNJ", "HANNOVER" ], [ "IBD", "BASSANO-DEL-G" ], [ "IBU", "BUSTO-A" ], [ "ICM", "COMO" ], [ "IIM", "IBERIA" ], [ "ILJ", "LECCO" ], [ "IOE", "OMEGNA" ], [ "IPO", "PERO" ], [ "ISV", "SAVONA" ], [ "LJU", "SLOVENIA" ], [ "LUG", "SVIZZERA" ], [ "LYS", "FRANCIA" ], [ "MAD", "MADRID" ], [ "MDA", "MODENA" ], [ "MIL", "PESCHIERA" ], [ "MILA", "MILANO NEW" ], [ "MM1", "MILANO-MEGA" ], [ "MRS", "MARSIGLIA" ], [ "MV9", "FRANCIA" ], [ "MXP", "MALPENSA" ], [ "MZ1", "MONZA" ], [ "NC3", "NAPOLI-C" ], [ "NT3", "NAPOLI-T" ], [ "OS3", "ORBASSANO" ], [ "OSO", "SONDRIO" ], [ "PD2", "PADOVA" ], [ "PMF", "PARMA" ], [ "PRG", "PRAGA" ], [ "PSA", "PISA" ], [ "PSR", "BENTIVOGLIO" ], [ "QAL", "ALESSANDRIA" ], [ "QAR", "OLANDA" ], [ "QPA", "PADOVA" ], [ "QVA", "VARESE" ], [ "REM", "REGGIO" ], [ "RNV", "NOVARA" ], [ "SKG", "GRECIA" ], [ "TO1", "TORINO" ], [ "TV1", "TREVISO" ], [ "VBS", "BRESCIA" ], [ "VCE", "VENEZIA" ], [ "VE1", "VENEZIA" ], [ "VNZ", "VICENZA" ], [ "VRN", "VERONA" ], [ "WA1", "VARSAVIA" ], [ "XWT", "VIENNA" ], [ "ZD1", "ZIBIDO" ], [ "ZRH", "SVIZZERA" ] ];
+    const TABELLA_DEST_PARCEL = [ [ "AN6", "ANCONA" ], [ "ATH", "ATENE" ], [ "B7Q", "BOLOGNA" ], [ "B8Y", "BERGAMO" ], [ "BA5", "BARI" ], [ "BCN", "BARCELLONA" ], [ "BEA", "BIELLA" ], [ "BO1", "BOLOGNA" ], [ "BO2", "BOLOGNA" ], [ "BRG", "BERGAMO" ], [ "BZQ", "BELGIO" ], [ "CUF", "CUNEO" ], [ "C5H", "FRANCIA" ], [ "DFT", "GERMANIA" ], [ "DNG", "NORIMBERGA" ], [ "ECL", "FRANCIA" ], [ "FC5", "FIRENZE" ], [ "FIA", "FIANO" ], [ "GOA", "GENOVA" ], [ "HNJ", "HANNOVER" ], [ "IBD", "BASSANO-DEL-G" ], [ "IBU", "BUSTO-A" ], [ "ICM", "COMO" ], [ "IIM", "IBERIA" ], [ "ILJ", "LECCO" ], [ "IOE", "OMEGNA" ], [ "IPO", "PERO" ], [ "ISV", "SAVONA" ], [ "LJU", "SLOVENIA" ], [ "LUG", "SVIZZERA" ], [ "LYS", "FRANCIA" ], [ "MAD", "MADRID" ], [ "MDA", "MODENA" ], [ "MIL", "PESCHIERA" ], [ "MILA", "MILANO NEW" ], [ "MM1", "MILANO-MEGA" ], [ "MRS", "MARSIGLIA" ], [ "MV9", "FRANCIA" ], [ "MXP", "MALPENSA" ], [ "MZ1", "MONZA" ], [ "NC3", "NAPOLI-C" ], [ "NT3", "NAPOLI-T" ], [ "OS3", "ORBASSANO" ], [ "OSO", "SONDRIO" ], [ "PD2", "PADOVA" ], [ "PMF", "PARMA" ], [ "PRG", "PRAGA" ], [ "PSA", "PISA" ], [ "PSR", "BENTIVOGLIO" ], [ "QAL", "ALESSANDRIA" ], [ "QAR", "OLANDA" ], [ "QPA", "PADOVA" ], [ "QVA", "VARESE" ], [ "REM", "REGGIO" ], [ "RNV", "NOVARA" ], [ "SKG", "GRECIA" ], [ "TO1", "TORINO" ], [ "TV1", "TREVISO" ], [ "VBS", "BRESCIA" ], [ "VCE", "VENEZIA" ], [ "VE1", "VENEZIA" ], [ "VNZ", "VICENZA" ], [ "VRN", "VERONA" ], [ "WA1", "VARSAVIA" ], [ "XWT", "VIENNA" ], [ "ZD1", "ZIBIDO" ], [ "ZRH", "SVIZZERA" ] ];
     const urlDockingDoorsViste = new Set;
     const urlParkingBayViste = new Set;
     const urlMovimentiViste = new Set;
